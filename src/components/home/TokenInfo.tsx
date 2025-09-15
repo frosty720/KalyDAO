@@ -17,7 +17,7 @@ import { Button } from "../ui/button";
 const MAX_SUPPLY = 7000000000; // 7 billion KLC
 
 const TokenInfo = () => {
-  const { tokenData, isLoading, error, refetch } = useTokenData(true); // true for testnet, false for mainnet
+  const { tokenData, isLoading, error, refetch } = useTokenData(false); // true for testnet, false for mainnet
 
   // Calculate circulating percentage directly using raw values
   const circulatingPercentage = useMemo(() => {
