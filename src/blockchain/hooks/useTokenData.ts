@@ -94,23 +94,32 @@ export function useTokenData(
       const baseUrl = getKalyscanApiUrl(isTestnet);
       
       console.log(`Fetching token data from: ${baseUrl}/v2/stats at ${refreshTime.toLocaleTimeString()}`);
-      
-      // Fetch on-chain stats from KalyScan API
-      const statsResponse = await axios.get(`${baseUrl}/v2/stats`);
-      console.log("Stats API response:", statsResponse.data);
-      
-      // Try to get circulating supply directly from token info
+
+      // Initialize variables for API data with fallback values
+      let statsData = {};
       let circulatingFromTokenInfo = null;
+
+      // Try to fetch on-chain stats from KalyScan API with error handling
+      try {
+        const statsResponse = await axios.get(`${baseUrl}/v2/stats`);
+        console.log("Stats API response:", statsResponse.data);
+        statsData = statsResponse.data || {};
+      } catch (err) {
+        console.warn("Could not fetch stats from KalyScan API, using fallback data:", err);
+        // Continue with empty statsData, will use fallback values below
+      }
+
+      // Try to get circulating supply directly from token info
       try {
         const tokenResponse = await axios.get(`${baseUrl}/v2/tokens`);
         console.log("Token API response:", tokenResponse.data);
-        
+
         // Look for KLC token in the tokens list
         if (Array.isArray(tokenResponse.data)) {
-          const klcToken = tokenResponse.data.find((token: any) => 
+          const klcToken = tokenResponse.data.find((token: any) =>
             token.symbol === 'KLC' || token.name === 'KalyChain'
           );
-          
+
           if (klcToken && klcToken.circulating_supply) {
             circulatingFromTokenInfo = Number(klcToken.circulating_supply);
             console.log(`Found circulating supply from token info: ${circulatingFromTokenInfo}`);
@@ -120,62 +129,72 @@ export function useTokenData(
         console.warn("Could not fetch token info for circulating supply:", err);
       }
       
-      // Try to fetch CMC data for the latest price change
+      // Try to fetch live data from CoinGecko API
+      let coinGeckoPrice = 0.001214; // Default fallback price
       let cmcPriceChange = 0.08; // Default fallback
       let cmcVolume = 40070; // Default fallback
       let cmcAtl = 0.001203; // Default fallback
       let cmcAth = 0.5844; // Default fallback
-      
+
       try {
-        // Try to get updated price change from CMC or another reliable source
-        const cmcProxyUrl = 'https://api.coingecko.com/api/v3/coins/kalycoin';
-        const cmcResponse = await axios.get(cmcProxyUrl);
-        
-        if (cmcResponse.data && cmcResponse.data.market_data) {
-          const marketData = cmcResponse.data.market_data;
-          
+        // Fetch live data from CoinGecko API
+        const coinGeckoUrl = 'https://api.coingecko.com/api/v3/coins/kalycoin';
+        const coinGeckoResponse = await axios.get(coinGeckoUrl);
+
+        if (coinGeckoResponse.data && coinGeckoResponse.data.market_data) {
+          const marketData = coinGeckoResponse.data.market_data;
+
+          // Get current price (MOST IMPORTANT!)
+          if (marketData.current_price && marketData.current_price.usd) {
+            coinGeckoPrice = marketData.current_price.usd;
+            console.log(`✅ Successfully fetched live CoinGecko price: $${coinGeckoPrice}`);
+          } else {
+            console.warn('❌ CoinGecko API did not return current_price, using fallback value');
+          }
+
           // Get 24h price change percentage
           if (marketData.price_change_percentage_24h !== undefined) {
-            cmcPriceChange = Math.abs(marketData.price_change_percentage_24h);
-            console.log(`✅ Successfully fetched live CMC price change: ${cmcPriceChange}% (raw value: ${marketData.price_change_percentage_24h})`);
+            cmcPriceChange = marketData.price_change_percentage_24h;
+            console.log(`✅ Successfully fetched live price change: ${cmcPriceChange}%`);
           } else {
             console.warn('❌ CoinGecko API did not return price_change_percentage_24h, using fallback value');
           }
-          
+
           // Get 24h volume
           if (marketData.total_volume && marketData.total_volume.usd) {
             cmcVolume = marketData.total_volume.usd;
-            console.log(`Got CMC volume: $${cmcVolume}`);
+            console.log(`✅ Got CoinGecko volume: $${cmcVolume}`);
           }
-          
+
           // Get ATH and ATL if available
           if (marketData.ath && marketData.ath.usd) {
             cmcAth = marketData.ath.usd;
+            console.log(`✅ Got ATH: $${cmcAth}`);
           }
-          
+
           if (marketData.atl && marketData.atl.usd) {
             cmcAtl = marketData.atl.usd;
+            console.log(`✅ Got ATL: $${cmcAtl}`);
           }
         }
       } catch (err) {
-        console.warn("Could not fetch CMC data, using fallback values:", err);
+        console.warn("Could not fetch CoinGecko data, using fallback values:", err);
       }
-      
-      // CMC data for KalyChain for missing fields (from https://coinmarketcap.com/currencies/kalycoin/)
-      const cmcData = {
+
+      // CoinGecko data for KalyChain (from https://www.coingecko.com/en/coins/kalycoin)
+      const coinGeckoData = {
         price_change_24h_percent: cmcPriceChange, // Use the dynamically fetched value
-        volume_24h: cmcVolume, 
-        ath: cmcAth, 
-        atl: cmcAtl, 
-        current_price: 0.001214 
+        volume_24h: cmcVolume,
+        ath: cmcAth,
+        atl: cmcAtl,
+        current_price: coinGeckoPrice // Use live CoinGecko price
       };
       
-      // Extract data from the API response
-      const statsData = statsResponse.data || {};
-      const coin_price = statsData.coin_price;
-      const coin_market_cap = statsData.coin_market_cap;
-      const coin_circulating_supply = statsData.coin_circulating_supply;
-      const totalSupplyValue = statsData.total_supply;
+      // Extract data from the API response (statsData was already initialized above)
+      const coin_price = (statsData as any).coin_price;
+      const coin_market_cap = (statsData as any).coin_market_cap;
+      const coin_circulating_supply = (statsData as any).coin_circulating_supply;
+      const totalSupplyValue = (statsData as any).total_supply;
       
       console.log(`API coin_price: ${coin_price}`);
       console.log(`API coin_market_cap: ${coin_market_cap}`);
@@ -204,30 +223,36 @@ export function useTokenData(
       
       console.log(`Total supply: ${actualTotalSupply}, Circulating: ${actualCirculatingSupply}`);
       
-      // Get price directly from API if available
+      // Get price with priority: CoinGecko > KalyScan API > Fallback
       let priceValue: number;
       let currentPrice: string;
-      
-      if (coin_price && coin_price !== "0" && coin_price !== "0.0") {
-        // Convert to dollars and format with more decimal places for small values
-        priceValue = Number(coin_price);
-        console.log(`Raw price value: ${priceValue}`);
-        
-        if (priceValue < 0.1) {
-          currentPrice = `$${priceValue.toFixed(6)}`;
-        } else if (priceValue < 1) {
-          currentPrice = `$${priceValue.toFixed(4)}`;
-        } else {
-          currentPrice = `$${priceValue.toFixed(2)}`;
-        }
-        
-        console.log(`Using API price: ${currentPrice}`);
-      } else {
-        // Use CMC price as fallback
-        priceValue = cmcData.current_price;
-        currentPrice = `$${priceValue.toFixed(6)}`;
-        console.log(`Using CMC fallback price: ${currentPrice}`);
+
+      // Priority 1: Use CoinGecko price (most reliable)
+      if (coinGeckoPrice && coinGeckoPrice > 0) {
+        priceValue = coinGeckoPrice;
+        console.log(`✅ Using CoinGecko live price: $${priceValue}`);
       }
+      // Priority 2: Try KalyScan API if CoinGecko failed
+      else if (coin_price && coin_price !== "0" && coin_price !== "0.0") {
+        priceValue = Number(coin_price);
+        console.log(`Using KalyScan API price: $${priceValue}`);
+      }
+      // Priority 3: Use fallback
+      else {
+        priceValue = coinGeckoData.current_price;
+        console.log(`⚠️ Using fallback price: $${priceValue}`);
+      }
+
+      // Format price based on value
+      if (priceValue < 0.1) {
+        currentPrice = `$${priceValue.toFixed(6)}`;
+      } else if (priceValue < 1) {
+        currentPrice = `$${priceValue.toFixed(4)}`;
+      } else {
+        currentPrice = `$${priceValue.toFixed(2)}`;
+      }
+
+      console.log(`Final formatted price: ${currentPrice}`);
       
       // Calculate market cap using price * circulating supply if not available from API
       let marketCapValue: number;
@@ -243,13 +268,13 @@ export function useTokenData(
       
       const marketCap = formatNumber(marketCapValue);
       console.log(`Formatted market cap: ${marketCap}`);
-      
-      // Use percentage change from CMC - use the dynamically fetched value
-      const percentChange = cmcData.price_change_24h_percent;
+
+      // Use percentage change from CoinGecko - use the dynamically fetched value
+      const percentChange = coinGeckoData.price_change_24h_percent;
       const isPositive = percentChange >= 0;
-      
+
       console.log(`📊 Setting price change value: ${percentChange}%, isPositive: ${isPositive}`);
-      
+
       // Update token data with all processed values
       setTokenData({
         totalSupply,
@@ -261,9 +286,9 @@ export function useTokenData(
           value: Math.abs(percentChange),
           isPositive
         },
-        volume24h: formatNumber(cmcData.volume_24h),
-        allTimeHigh: `$${cmcData.ath.toFixed(4)}`,
-        allTimeLow: `$${cmcData.atl.toFixed(6)}`,
+        volume24h: formatNumber(coinGeckoData.volume_24h),
+        allTimeHigh: `$${coinGeckoData.ath.toFixed(4)}`,
+        allTimeLow: `$${coinGeckoData.atl.toFixed(6)}`,
         rawTotalSupply: actualTotalSupply,
         rawCirculatingSupply: actualCirculatingSupply,
         lastUpdated: refreshTime

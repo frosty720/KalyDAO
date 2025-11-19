@@ -32,6 +32,6 @@ dev-notes/
 **/tempobook/storyboards/
 
 core
-
+supabase_backup/
 .github/
 
