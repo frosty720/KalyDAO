@@ -29,6 +29,9 @@ export default defineConfig({
     },
   },
   server: {
+    // Honor the port/host injected by portless (falls back to Vite defaults).
+    host: process.env.HOST || "127.0.0.1",
+    port: process.env.PORT ? Number(process.env.PORT) : 5173,
     // @ts-ignore
     allowedHosts: true,
   }

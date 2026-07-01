@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Home, FileText, PenSquare, Menu, X, Vote, Wallet } from "lucide-react";
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { WalletButton } from '@/components/WalletButton';
 
 const Header = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -80,7 +80,7 @@ const Header = () => {
 
         {/* RainbowKit Connect Button */}
         <div className="ml-auto">
-          <ConnectButton />
+          <WalletButton compact />
         </div>
       </div>
 

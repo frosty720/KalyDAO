@@ -53,21 +53,17 @@ const delegationABI = [
 ] as const;
 
 // Add these utility functions at the top level
-const BLOCKS_PER_DAY = 28800; // Assuming 3-second block time
-const DAYS_TO_LOOK_BACK = 30; // Look back 30 days by default
+const BLOCKS_PER_DAY = 43200; // KalyChain ~2-second blocks
+const DAYS_TO_LOOK_BACK = 7; // Bounded recent window (was 30 → big getLogs scan)
+const MAX_LOOKBACK_BLOCKS = BigInt(BLOCKS_PER_DAY * DAYS_TO_LOOK_BACK);
 
 async function getBlockRange(publicClient: any) {
-  try {
-    const latestBlock = await publicClient.getBlockNumber();
-    const fromBlock = latestBlock - BigInt(BLOCKS_PER_DAY * DAYS_TO_LOOK_BACK);
-    return {
-      fromBlock: fromBlock > 0n ? fromBlock : 0n,
-      toBlock: latestBlock
-    };
-  } catch (error) {
-    console.error('Error getting block range:', error);
-    return { fromBlock: 0n, toBlock: 'latest' };
-  }
+  // Let getBlockNumber throw to the caller (which skips on error) rather than
+  // falling back to fromBlock:0 — that turned a transient RPC hiccup into a
+  // genesis-to-tip getLogs scan.
+  const latestBlock = await publicClient.getBlockNumber();
+  const fromBlock = latestBlock > MAX_LOOKBACK_BLOCKS ? latestBlock - MAX_LOOKBACK_BLOCKS : 0n;
+  return { fromBlock, toBlock: latestBlock };
 }
 
 export function DelegationManager() {
@@ -93,7 +89,7 @@ export function DelegationManager() {
   // Get current delegate
   const { data: currentDelegate, refetch: refetchDelegate } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
-    abi: governanceTokenABI.abi as Abi,
+    abi: governanceTokenABI.abi as any,
     functionName: 'delegates',
     args: [address || '0x0000000000000000000000000000000000000000'],
     chainId,
@@ -103,7 +99,7 @@ export function DelegationManager() {
   // Get voting power
   const { data: votingPower, refetch: refetchVotingPower } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
-    abi: governanceTokenABI.abi as Abi,
+    abi: governanceTokenABI.abi as any,
     functionName: 'getVotes',
     args: [address || '0x0000000000000000000000000000000000000000'],
     chainId,
@@ -113,7 +109,7 @@ export function DelegationManager() {
   // Get token balance
   const { data: tokenBalance, refetch: refetchBalance } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
-    abi: governanceTokenABI.abi as Abi,
+    abi: governanceTokenABI.abi as any,
     functionName: 'balanceOf',
     args: [address || '0x0000000000000000000000000000000000000000'],
     chainId,
@@ -207,20 +203,25 @@ export function DelegationManager() {
          addresses.add(currentDelegate as string);
        }
 
+       // Cap the fan-out: getVotes+balanceOf for every unique address can be
+       // hundreds of RPC calls per mount. Bound it.
+       const MAX_ADDRESSES = 75;
+       const addressList = Array.from(addresses).slice(0, MAX_ADDRESSES);
+
        // Get data for each address (depends on publicClient, governanceTokenAddress, addresses array)
        const delegatesData = await Promise.all(
-         Array.from(addresses).map(async (addr) => {
+         addressList.map(async (addr) => {
            try {
-             const votingPower = await publicClient.readContract({
+             const votingPower = await (publicClient as any).readContract({
                address: governanceTokenAddress as `0x${string}`,
-               abi: governanceTokenABI.abi as Abi,
+               abi: governanceTokenABI.abi as any,
                functionName: 'getVotes',
                args: [addr as `0x${string}`]
              });
 
-             const balance = await publicClient.readContract({
+             const balance = await (publicClient as any).readContract({
                address: governanceTokenAddress as `0x${string}`,
-               abi: governanceTokenABI.abi as Abi,
+               abi: governanceTokenABI.abi as any,
                functionName: 'balanceOf',
                args: [addr as `0x${string}`]
              });
@@ -365,8 +366,9 @@ export function DelegationManager() {
     isLoading: isConfirming, 
     isSuccess: isConfirmed, 
     error: confirmationError 
-  } = useWaitForTransactionReceipt({ 
-    hash, 
+  } = useWaitForTransactionReceipt({
+    hash,
+    chainId, // pin to the same chain the delegate write targets
     query: {
       enabled: !!hash,
     }

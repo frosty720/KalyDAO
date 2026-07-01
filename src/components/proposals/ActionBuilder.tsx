@@ -586,8 +586,8 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
                   {getTemplatesForCategory().map((template) => (
                     <div 
                       key={template.key}
-                      className={`p-2 border rounded-md cursor-pointer hover:bg-gray-100 transition-colors ${
-                        parameterKey === template.key ? 'border-primary bg-primary/10' : 'border-gray-200'
+                      className={`p-2 border rounded-md cursor-pointer hover:bg-secondary transition-colors ${
+                        parameterKey === template.key ? 'border-primary bg-primary/10' : 'border-border'
                       }`}
                       onClick={() => handleTemplateSelect(template)}
                     >
@@ -720,7 +720,7 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
       {field.value && field.value !== '0x' && (
         <div className="mt-2">
           <p className="text-xs font-medium text-muted-foreground">Generated Calldata:</p>
-          <pre className="text-xs bg-gray-100 p-2 rounded overflow-x-auto">{field.value}</pre>
+          <pre className="text-xs bg-secondary p-2 rounded overflow-x-auto">{field.value}</pre>
         </div>
       )}
     </div>

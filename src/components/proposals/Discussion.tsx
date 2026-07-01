@@ -131,7 +131,7 @@ export const Discussion = ({ proposalId }: DiscussionProps) => {
       {/* Comments list */}
       <div className="space-y-4">
         {comments.map((comment) => (
-          <div key={comment.id} className="bg-gray-50 p-4 rounded-lg space-y-2">
+          <div key={comment.id} className="bg-secondary p-4 rounded-lg space-y-2">
             <div className="flex items-center gap-2">
               <Avatar className="h-8 w-8">
                 <AvatarFallback>
@@ -142,17 +142,17 @@ export const Discussion = ({ proposalId }: DiscussionProps) => {
                 <p className="text-sm font-medium">
                   {formatAddress(comment.user_address)}
                 </p>
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-muted-foreground">
                   {formatDistanceToNow(new Date(comment.created_at), { addSuffix: true })}
                 </p>
               </div>
             </div>
-            <p className="text-gray-700 whitespace-pre-wrap">{comment.content}</p>
+            <p className="text-gray-300 whitespace-pre-wrap">{comment.content}</p>
           </div>
         ))}
         
         {comments.length === 0 && (
-          <div className="text-center text-gray-500 py-8">
+          <div className="text-center text-muted-foreground py-8">
             No comments yet. Be the first to share your thoughts!
           </div>
         )}

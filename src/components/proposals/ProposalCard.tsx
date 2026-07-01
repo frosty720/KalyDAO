@@ -50,9 +50,19 @@ const ProposalCard = ({
         : num.toString();
   };
 
+  // If the deadline has passed, voting is closed regardless of the (often stale)
+  // stored status — prevents an "Active" badge sitting next to an "Ended" timer.
+  const votingClosed = timeRemaining === "Ended";
+  const displayStatus =
+    votingClosed && (status === "active" || status === "pending") ? "closed" : status;
+  const statusLabel =
+    displayStatus === "closed"
+      ? "Closed"
+      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
+
   // Status badge color
   const getStatusColor = () => {
-    switch (status) {
+    switch (displayStatus) {
       case "active":
         return "bg-blue-100 text-blue-800";
       case "passed":
@@ -66,19 +76,19 @@ const ProposalCard = ({
       case "executed":
         return "bg-teal-100 text-teal-800";
       default:
-        return "bg-gray-100 text-gray-800";
+        return "bg-secondary text-foreground";
     }
   };
 
   return (
-    <Card className="w-full max-w-md bg-white overflow-hidden hover:shadow-lg transition-shadow duration-300">
+    <Card className="w-full max-w-md overflow-hidden hover:shadow-lg transition-shadow duration-300">
       <CardHeader>
         <div className="flex justify-between items-start">
           <CardTitle className="text-xl font-bold">{title}</CardTitle>
           <span
             className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor()}`}
           >
-            {status.charAt(0).toUpperCase() + status.slice(1)}
+            {statusLabel}
           </span>
         </div>
         <CardDescription className="mt-2 line-clamp-2">
@@ -110,8 +120,8 @@ const ProposalCard = ({
             {votesAbstain > 0 && (
               <div className="flex justify-end mt-1 text-sm">
                 <div className="flex items-center gap-1">
-                  <MinusCircle className="h-4 w-4 text-gray-500" />
-                  <span className="text-gray-600">
+                  <MinusCircle className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-muted-foreground">
                     {formatNumber(votesAbstain)} ({abstainPercentage}%) Abstain
                   </span>
                 </div>
@@ -120,7 +130,7 @@ const ProposalCard = ({
           </div>
 
           {/* Time and participation */}
-          <div className="flex justify-between text-sm text-gray-600">
+          <div className="flex justify-between text-sm text-muted-foreground">
             <div className="flex items-center gap-1">
               <Clock className="h-4 w-4" />
               <span>{timeRemaining}</span>
