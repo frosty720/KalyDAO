@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm, useFieldArray } from "react-hook-form";
@@ -14,7 +14,7 @@ import {
   useReadContract
 } from 'wagmi';
 import { type Abi } from 'viem';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { WalletButton } from '@/components/WalletButton';
 import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
 import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
@@ -58,8 +58,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 // Import the new ActionBuilder
 import ActionBuilder from './ActionBuilder';
+import { buildSignalingAction, isValidActionTarget } from '@/lib/proposals';
+
+type ProposalType = 'signaling' | 'action';
 
 interface CreateProposalProps {
   minProposalThreshold?: number;
@@ -96,6 +100,25 @@ const formSchema = z.object({
 
 // Update FormData type
 type FormData = z.infer<typeof formSchema>;
+
+// Live character counter for the min/max-limited text fields. Shows the requirement
+// up front and updates as the user types, so a too-short entry is obvious before submit.
+const CharCount = ({ value, min, max }: { value?: string; min: number; max?: number }) => {
+  const len = value?.length ?? 0;
+  const belowMin = len < min;
+  const overMax = max !== undefined && len > max;
+  const color = belowMin || overMax ? 'text-red-500' : 'text-green-500';
+  const hint = belowMin
+    ? `${min - len} more needed`
+    : overMax
+      ? `${len - max} over max`
+      : 'ok';
+  return (
+    <span className={`text-xs font-medium tabular-nums ${color}`}>
+      {len}/{min}{max ? `–${max}` : '+'} · {hint}
+    </span>
+  );
+};
 
 // Define minimal ABI for the propose function
 // Remove the existing governorABI since we'll use the useDao hook
@@ -145,11 +168,15 @@ const CreateProposal = ({
   // Using toast imported from "@/components/ui/use-toast"
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [proposalType, setProposalType] = useState<ProposalType>('signaling');
+  // Exact actions we submitted on-chain, kept so the Supabase record (used later
+  // for queue/execute) stores params identical to what we proposed.
+  const submittedActionsRef = useRef<{ targets: string[]; values: string[]; calldatas: string[] } | null>(null);
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const [proposalId, setProposalId] = useState<string>();
   const [txHash, setTxHash] = useState<`0x${string}` | undefined>();
-  const { contracts, createProposal } = useDao();
+  const { contracts } = useDao();
   
   // Get the correct token address based on current network
   const governanceTokenAddress = chainId === 3889 
@@ -174,16 +201,58 @@ const CreateProposal = ({
     }
   }, [balance, chainId, governanceTokenAddress, balanceError, isConnected, address]);
 
-  const userVotingPower = balance ? parseFloat(balance.formatted) : 0;
-  const hasEnoughVotingPower = userVotingPower >= minProposalThreshold;
+  // Proposing power is delegated getVotes(), NOT raw balance. A holder who never
+  // self-delegated has a balance but 0 votes; gating on balance let them pass the UI
+  // and then revert on-chain. We also detect that case to prompt delegation.
+  const { data: votesRaw } = useReadContract({
+    address: governanceTokenAddress as `0x${string}`,
+    abi: [
+      {
+        name: 'getVotes',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [{ name: 'account', type: 'address' }],
+        outputs: [{ name: '', type: 'uint256' }],
+      },
+    ] as const,
+    functionName: 'getVotes',
+    args: address ? [address] : undefined,
+    chainId,
+    query: { enabled: !!address },
+  });
+
+  const tokenBalance = balance ? parseFloat(balance.formatted) : 0;
+  const userVotingPower = votesRaw !== undefined ? Number(votesRaw) / 1e18 : 0; // display only
+  // Compare in EXACT wei, not floats: Number(100000e18)/1e18 rounds to 99999.9999…,
+  // so a holder with exactly the threshold would wrongly fail `>= minProposalThreshold`.
+  const thresholdRaw = BigInt(Math.floor(minProposalThreshold)) * 10n ** 18n;
+  const hasEnoughVotingPower = votesRaw !== undefined && (votesRaw as bigint) >= thresholdRaw;
+  // Holds tokens but hasn't activated enough of them by delegating.
+  const needsDelegation = tokenBalance > 0 && !hasEnoughVotingPower;
 
   // Get the correct governor contract address based on current network
   const governorAddress = chainId === 3889
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
 
-  const { data: hash, writeContract, isPending } = useWriteContract();
-  
+  const { data: hash, writeContract, isPending, error: writeError } = useWriteContract();
+
+  // Surface wallet rejection / write failure. Without this the button stays stuck on
+  // "Creating Proposal…" forever (writeContract doesn't throw; the failure lands here).
+  useEffect(() => {
+    if (writeError) {
+      console.error('Proposal write failed:', writeError);
+      setIsSubmitting(false);
+      const msg = (writeError as { shortMessage?: string }).shortMessage || writeError.message;
+      toast({
+        title: 'Transaction failed',
+        description: /user rejected|denied/i.test(msg) ? 'You rejected the transaction.' : msg,
+        variant: 'destructive',
+      });
+    }
+  }, [writeError]);
+
+
   const { data: votingDelay } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorAbi,
@@ -216,10 +285,29 @@ const CreateProposal = ({
       // When we have a hash, we can wait for the transaction receipt
       const processTransaction = async () => {
         try {
-          // Using ethers to wait for the transaction
-          const provider = new ethers.providers.Web3Provider(window.ethereum as any);
+          // Wait for the receipt by POLLING getTransactionReceipt directly. ethers'
+          // waitForTransaction() leans on the provider's internal polling/event loop,
+          // which stalls forever when the (flaky) testnet RPC hiccups — leaving the UI
+          // stuck on "Creating Proposal...". A direct poll tolerates transient errors
+          // and is bounded by a hard timeout so the flow always resolves.
+          const provider = new ethers.providers.JsonRpcProvider((chainId === 3889 ? kalyChainTestnet : kalyChainMainnet).rpcUrls.default.http[0]);
           console.log('Waiting for transaction confirmation...');
-          const receipt = await provider.waitForTransaction(hash);
+          let receipt: ethers.providers.TransactionReceipt | null = null;
+          const deadline = Date.now() + 150_000; // up to 2.5 min
+          while (Date.now() < deadline) {
+            try {
+              receipt = await provider.getTransactionReceipt(hash);
+            } catch (pollErr) {
+              console.warn('Receipt poll hiccup (will retry):', pollErr);
+            }
+            if (receipt) break;
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          if (!receipt) {
+            throw new Error(
+              'Timed out waiting for confirmation. The proposal may still have been created — check the Proposals page in a moment.',
+            );
+          }
           console.log('Transaction confirmed!', receipt);
           
           const proposalId = await processTransactionReceipt(receipt);
@@ -237,11 +325,15 @@ const CreateProposal = ({
               
               // Prepare action data for Supabase
               // Convert values to strings
-              let supabaseTargets: string[] = [];
-              let supabaseValues: string[] = [];
-              let supabaseCalldatas: string[] = [];
+              // Prefer the exact actions we submitted (signaling no-op or the
+              // validated action set) so the stored params match the on-chain
+              // proposal; fall back to raw form values only if unavailable.
+              const submitted = submittedActionsRef.current;
+              let supabaseTargets: string[] = submitted?.targets ?? [];
+              let supabaseValues: string[] = submitted?.values ?? [];
+              let supabaseCalldatas: string[] = submitted?.calldatas ?? [];
 
-              if (formValues.actions) {
+              if (!submitted && formValues.actions) {
                   supabaseTargets = formValues.actions.map(action => action.target);
                   supabaseValues = formValues.actions.map(action => action.value); // Already strings from form
                   supabaseCalldatas = formValues.actions.map(action => action.calldata);
@@ -363,7 +455,7 @@ const CreateProposal = ({
       console.log('Getting on-chain data for proposal:', proposalId);
       
       // Create provider and contract instances
-      const provider = new ethers.providers.Web3Provider(window.ethereum as any);
+      const provider = new ethers.providers.JsonRpcProvider((chainId === 3889 ? kalyChainTestnet : kalyChainMainnet).rpcUrls.default.http[0]);
       
       // Get governor contract instance
       const governorContract = new ethers.Contract(
@@ -491,31 +583,10 @@ const CreateProposal = ({
       }
     }
     
-    console.warn('Could not find proposal ID in event data, checking transaction hash...');
-    
-    // As a fallback, use the transaction hash as a unique identifier
-    if (receipt.transactionHash) {
-      const txHash = receipt.transactionHash;
-      console.log('Using transaction hash as fallback identifier:', txHash);
-      
-      // Create a numeric-like ID from the transaction hash
-      // Take last 16 chars of the hash and convert to a decimal string
-      const txIdHex = '0x' + txHash.slice(-16);
-      const txIdDecimal = BigInt(txIdHex).toString();
-      
-      console.log('Generated proposal ID from tx hash:', txIdDecimal);
-      
-      // Store both formats
-      localStorage.setItem('lastProposalIdHex', txIdHex);
-      localStorage.setItem('lastProposalIdDecimal', txIdDecimal);
-      
-      // Set the proposal ID in state for navigation
-      setProposalId(txIdDecimal);
-      
-      return txIdDecimal;
-    }
-    
-    console.error('Could not extract proposal ID from transaction logs');
+    // Do NOT fabricate an ID from the tx hash: a fake proposalId never matches the
+    // on-chain proposal, so the detail page, queue, and execute all break for that
+    // row. Treat a missing ProposalCreated log as a hard failure instead.
+    console.error('Could not extract proposalId from the ProposalCreated event logs');
     return null;
   };
   
@@ -647,28 +718,66 @@ const CreateProposal = ({
     try {
       setIsSubmitting(true);
       setError(null);
-      
-      // Remove dummy values and require at least one action
-      if (!formData.actions || formData.actions.length === 0) {
-        throw new Error("At least one action is required for the proposal");
+
+      // Build the on-chain actions. Signaling ("vote only") proposals attach a
+      // single harmless DAOSettings no-op so they satisfy the Governor's
+      // "at least one action" rule without the user touching targets/calldata.
+      let actions: { target: `0x${string}`; value: bigint; calldata: `0x${string}` }[];
+
+      if (proposalType === 'signaling') {
+        const daoSettingsAddress = (chainId === 3889
+          ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.DAO_SETTINGS
+          : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.DAO_SETTINGS) as `0x${string}`;
+        const signal = buildSignalingAction(daoSettingsAddress, formData.title);
+        actions = [{ target: signal.target, value: BigInt(signal.value), calldata: signal.calldata }];
+      } else {
+        if (!formData.actions || formData.actions.length === 0) {
+          throw new Error('Add at least one action, or switch to a Signaling (vote only) proposal.');
+        }
+        // Validate every target up front: an empty/invalid target makes `propose`
+        // un-encodable and would otherwise hang the form with no wallet popup.
+        const badIndex = formData.actions.findIndex(a => !isValidActionTarget(a.target));
+        if (badIndex !== -1) {
+          throw new Error(
+            `Action ${badIndex + 1} has no valid target address. Pick an action type that sets a target, or use a Signaling (vote only) proposal.`,
+          );
+        }
+        actions = formData.actions.map(action => ({
+          target: action.target as `0x${string}`,
+          value: BigInt(action.value),
+          calldata: action.calldata as `0x${string}`,
+        }));
       }
 
-      // Always use actual proposal parameters
-      const targets = formData.actions.map(action => action.target) as `0x${string}`[];
-      const values = formData.actions.map(action => BigInt(action.value));
-      const calldatas = formData.actions.map(action => action.calldata) as `0x${string}`[];
+      const targets = actions.map(a => a.target);
+      const values = actions.map(a => a.value);
+      const calldatas = actions.map(a => a.calldata);
+
+      // Record exactly what we submit so the Supabase row stores matching params.
+      submittedActionsRef.current = {
+        targets,
+        values: values.map(v => v.toString()),
+        calldatas,
+      };
 
       // Combine description and fullDescription for on-chain storage
       const fullProposalText = `# ${formData.title}\n\n## Summary\n${formData.summary}\n\n## Description\n${formData.description}\n\n## Full Description\n${formData.fullDescription}`;
 
-      // Create proposal with actual parameters
+      // Create proposal with actual parameters.
+      // Gas config is REQUIRED on KalyChain: without an explicit gasPrice the tx goes
+      // out underpriced (below the ~1 Gwei minimum) and sits pending forever. Same
+      // config the wrap/vote/delegate writes use, with a higher gas LIMIT because
+      // `propose` (stores targets/calldatas + emits the full description) needs more
+      // than the default 300k.
       writeContract({
         address: contracts.governor.address as `0x${string}`,
         abi: governorAbi,
         functionName: 'propose',
         args: [targets, values, calldatas, fullProposalText],
         account: address,
-        chain: currentChain
+        chain: currentChain,
+        ...getTransactionGasConfig(),
+        gas: 1_500_000n,
       });
     } catch (err) {
       console.error('Failed to create proposal:', err);
@@ -683,18 +792,18 @@ const CreateProposal = ({
   };
 
   return (
-    <div className="w-full max-w-3xl mx-auto bg-white p-6 rounded-lg shadow-sm">
+    <div className="w-full max-w-3xl mx-auto bg-card p-6 rounded-lg shadow-sm">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">
+        <h1 className="text-2xl font-bold text-foreground">
           Create New Proposal
         </h1>
-        <p className="text-gray-600 mt-2">
+        <p className="text-muted-foreground mt-2">
           Submit a proposal for the KalyChain DAO to vote on. Proposals require
           a minimum of {minProposalThreshold.toLocaleString()} gKLC (Governance KLC) voting power
           to create.
         </p>
         {chainId && (
-          <p className="text-sm text-gray-500 mt-1">
+          <p className="text-sm text-muted-foreground mt-1">
             Network: {chainId === 3889 ? 'Testnet' : 'Mainnet'} | Your voting power: {userVotingPower.toLocaleString()} gKLC
           </p>
         )}
@@ -704,14 +813,14 @@ const CreateProposal = ({
         <Card>
           <CardContent className="pt-6">
             <div className="flex flex-col items-center justify-center py-6 text-center">
-              <AlertCircle className="h-12 w-12 text-gray-400 mb-4" />
-              <h3 className="text-lg font-medium text-gray-900">
+              <AlertCircle className="h-12 w-12 text-muted-foreground mb-4" />
+              <h3 className="text-lg font-medium text-foreground">
                 Wallet Not Connected
               </h3>
-              <p className="text-gray-500 mt-2 mb-4">
+              <p className="text-muted-foreground mt-2 mb-4">
                 You need to connect your wallet to create a proposal
               </p>
-              <ConnectButton />
+              <WalletButton />
             </div>
           </CardContent>
         </Card>
@@ -719,11 +828,18 @@ const CreateProposal = ({
         <div className="space-y-4">
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Insufficient Voting Power</AlertTitle>
+            <AlertTitle>{needsDelegation ? 'Activate Your Voting Power' : 'Insufficient Voting Power'}</AlertTitle>
             <AlertDescription>
-              You need at least {minProposalThreshold.toLocaleString()} gKLC voting
-              power to create a proposal. You currently have{" "}
-              {userVotingPower.toLocaleString()} gKLC.
+              {needsDelegation ? (
+                <>You hold {tokenBalance.toLocaleString()} gKLC but your active voting
+                power is {userVotingPower.toLocaleString()} — voting power only counts
+                once you delegate it (even to yourself). Visit the Delegation page to
+                activate it, then you can propose.</>
+              ) : (
+                <>You need at least {minProposalThreshold.toLocaleString()} gKLC voting
+                power to create a proposal. You currently have{" "}
+                {userVotingPower.toLocaleString()} gKLC.</>
+              )}
             </AlertDescription>
           </Alert>
           
@@ -735,12 +851,12 @@ const CreateProposal = ({
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-gray-600 mb-4">
+              <p className="text-sm text-muted-foreground mb-4">
                 gKLC (Governance KLC) is the governance token that gives you voting power in the DAO.
                 You can wrap your KLC tokens to gKLC and unwrap them back at any time.
               </p>
-              <Link 
-                to="/wrap"
+              <Link
+                to="/wrap-klc"
                 className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
               >
                 Wrap KLC to gKLC
@@ -767,6 +883,54 @@ const CreateProposal = ({
             )}
             <Card>
               <CardHeader>
+                <CardTitle>Proposal Type</CardTitle>
+                <CardDescription>
+                  Choose whether this proposal performs an on-chain action or is a vote only
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RadioGroup
+                  value={proposalType}
+                  onValueChange={(value) => setProposalType(value as ProposalType)}
+                  className="space-y-3"
+                >
+                  <label
+                    htmlFor="ptype-signaling"
+                    className={`flex items-start gap-3 p-4 border rounded-md cursor-pointer transition-colors ${
+                      proposalType === 'signaling' ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'
+                    }`}
+                  >
+                    <RadioGroupItem value="signaling" id="ptype-signaling" className="mt-1" />
+                    <div>
+                      <div className="font-medium">Signaling (vote only)</div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        A community decision with no on-chain action — e.g. approving a direction,
+                        a budget, or a change you&apos;ll apply manually. No contract address or
+                        calldata needed. <span className="font-medium">Recommended for most proposals.</span>
+                      </p>
+                    </div>
+                  </label>
+                  <label
+                    htmlFor="ptype-action"
+                    className={`flex items-start gap-3 p-4 border rounded-md cursor-pointer transition-colors ${
+                      proposalType === 'action' ? 'border-primary bg-primary/5' : 'border-border hover:bg-secondary'
+                    }`}
+                  >
+                    <RadioGroupItem value="action" id="ptype-action" className="mt-1" />
+                    <div>
+                      <div className="font-medium">On-chain action</div>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        The DAO executes a transaction if it passes — e.g. sending treasury funds
+                        or changing a governance parameter. You&apos;ll configure the action below.
+                      </p>
+                    </div>
+                  </label>
+                </RadioGroup>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
                 <CardTitle>Proposal Details</CardTitle>
                 <CardDescription>
                   Provide the basic information about your proposal
@@ -778,7 +942,10 @@ const CreateProposal = ({
                   name="title"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Title</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Title</FormLabel>
+                        <CharCount value={field.value} min={10} max={100} />
+                      </div>
                       <FormControl>
                         <Input
                           placeholder="Enter a clear, concise title"
@@ -798,7 +965,10 @@ const CreateProposal = ({
                   name="summary"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Summary</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Summary</FormLabel>
+                        <CharCount value={field.value} min={20} max={250} />
+                      </div>
                       <FormControl>
                         <Textarea
                           placeholder="Provide a brief summary of your proposal"
@@ -820,7 +990,10 @@ const CreateProposal = ({
                   name="description"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Description</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Description</FormLabel>
+                        <CharCount value={field.value} min={100} />
+                      </div>
                       <FormControl>
                         <Textarea
                           placeholder="Provide a detailed description of your proposal"
@@ -842,7 +1015,10 @@ const CreateProposal = ({
                   name="fullDescription"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Full Description</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Full Description</FormLabel>
+                        <CharCount value={field.value} min={200} />
+                      </div>
                       <FormControl>
                         <Textarea
                           placeholder="Provide comprehensive details, technical specifications, and implementation plans"
@@ -892,12 +1068,12 @@ const CreateProposal = ({
 
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <Info className="h-4 w-4 text-gray-400" />
-                    <span className="text-sm text-gray-600">
+                    <Info className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm text-muted-foreground">
                       Voting Configuration (set by contract):
                     </span>
                   </div>
-                  <div className="bg-gray-50 p-4 rounded-md space-y-2">
+                  <div className="bg-secondary p-4 rounded-md space-y-2">
                     <div className="flex justify-between text-sm">
                       <span>Voting Delay:</span>
                       <span>{formatBlocksToDays(votingDelay)} days ({votingDelay?.toString() || '...'} blocks)</span>
@@ -906,7 +1082,7 @@ const CreateProposal = ({
                       <span>Voting Period:</span>
                       <span>{formatBlocksToDays(votingPeriod)} days ({votingPeriod?.toString() || '...'} blocks)</span>
                     </div>
-                    <p className="text-xs text-gray-500 mt-2">
+                    <p className="text-xs text-muted-foreground mt-2">
                       After proposal creation, there is a {formatBlocksToDays(votingDelay)} day delay before voting starts.
                       Once voting begins, it remains open for {formatBlocksToDays(votingPeriod)} days.
                     </p>
@@ -915,7 +1091,7 @@ const CreateProposal = ({
               </CardContent>
             </Card>
 
-            {form.watch("category") && (
+            {proposalType === 'action' && form.watch("category") && (
               <Card>
                 <CardHeader>
                   <CardTitle>{form.watch("category").charAt(0).toUpperCase() + form.watch("category").slice(1)} Actions</CardTitle>

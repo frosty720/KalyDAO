@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -9,6 +9,9 @@ import {
   MinusCircle,
   AlertCircle,
   Loader2,
+  CheckCircle2,
+  Clock,
+  XCircle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import ReactMarkdown from 'react-markdown';
@@ -25,7 +28,7 @@ import {
   useWaitForTransactionReceipt,
   usePublicClient
 } from 'wagmi';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { WalletButton } from '@/components/WalletButton';
 import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -46,6 +49,16 @@ import {
 import { type ProposalMetadata } from '@/lib/supabase';
 import type { ProposalState } from '@/blockchain/types';
 import { supabase, proposalQueries } from '@/lib/supabase';
+import { useQuery } from '@tanstack/react-query';
+import {
+  getDaoSubgraphUrl,
+  queryProposalDetail,
+  queryHasVoted,
+  deriveProposalState,
+} from '@/lib/daoSubgraph';
+import { getProposalLifecycleStep } from '@/lib/proposalLifecycle';
+import { resolveDisplayVotes, isSpecialProposal, SPECIAL_PROPOSAL_IDS } from '@/lib/proposalVotes';
+import { useVoteHistory } from './useVoteHistory';
 import { useDao } from '@/blockchain/hooks/useDao';
 import { ethers } from 'ethers';
 import { Input } from "@/components/ui/input";
@@ -139,6 +152,13 @@ const governorABI = [
     outputs: [{ name: '', type: 'uint8' }]
   },
   {
+    name: 'quorum',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'blockNumber', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }]
+  },
+  {
     name: 'queue',
     type: 'function',
     stateMutability: 'nonpayable',
@@ -177,6 +197,16 @@ const governorABI = [
     outputs: [{ name: '', type: 'uint256' }]
   },
   {
+    name: 'hasVoted',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'proposalId', type: 'uint256' },
+      { name: 'account', type: 'address' }
+    ],
+    outputs: [{ name: '', type: 'bool' }]
+  },
+  {
     name: 'hashProposal',
     type: 'function',
     stateMutability: 'pure',
@@ -190,15 +220,6 @@ const governorABI = [
   }
 ] as const;
 
-const timelockAbi = [
-  {
-    inputs: [],
-    name: 'getMinDelay',
-    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function'
-  }
-] as const;
 
 const governanceTokenABI = [
   {
@@ -221,6 +242,12 @@ const ProposalDetail = ({
   minProposalThreshold = 100000,
 }: ProposalDetailProps) => {
   const { id } = useParams<{ id: string }>();
+  // Safe proposalId for contract calls: BigInt(id) throws during render on a
+  // malformed URL (e.g. /proposals/abc), white-screening the page. Parse once.
+  const safeProposalId = useMemo<bigint | null>(() => {
+    if (!id) return null;
+    try { return BigInt(id); } catch { return null; }
+  }, [id]);
   const [userVote, setUserVote] = useState<"for" | "against" | "abstain" | null>(null);
   const [voteDirection, setVoteDirection] = useState<"for" | "against" | "abstain" | null>(null);
   const [showVoteDialog, setShowVoteDialog] = useState(false);
@@ -236,137 +263,242 @@ const ProposalDetail = ({
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [queueExecuteError, setQueueExecuteError] = useState<string | null>(null);
   const [queueExecuteHash, setQueueExecuteHash] = useState<Hash | undefined>();
+  // Which action is in flight on the SHARED useWriteContract (vote/queue/execute).
+  // Each receipt pipeline checks this so a queue tx can't trigger the vote handler
+  // (that mislabeled queue txs as ABSTAIN votes) and vice-versa.
+  const lastActionRef = useRef<'queue' | 'execute' | 'vote' | null>(null);
   const [voteStatus, setVoteStatus] = useState<string | null>(null);
   const [refetchKey, setRefetchKey] = useState(0);
-  const [voteHistory, setVoteHistory] = useState<any[]>([]);
-  const [isLoadingVotes, setIsLoadingVotes] = useState(false);
   const [dbVoteTotals, setDbVoteTotals] = useState<{ votes_for: number, votes_against: number, votes_abstain: number } | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { contracts, vote, delegate } = useDao();
+
+  // A proposal must be read from ITS OWN chain (stored in Supabase chain_id), NOT the
+  // wallet's chain — otherwise viewing a mainnet proposal while connected to testnet
+  // (or vice-versa) reads the wrong Governor and shows empty/zero data. Until the
+  // Supabase row loads we fall back to the wallet chain. Defined before the receipt
+  // watcher below so it can be pinned to the proposal's chain.
+  const proposalChainId =
+    ((proposalData as { chain_id?: number } | null)?.chain_id) ?? chainId;
+  const isWrongNetwork = !!proposalData && chainId !== proposalChainId;
+  const currentChain = proposalChainId === 3889 ? kalyChainTestnet : kalyChainMainnet;
+
   const { data: txHash, error: writeError, isPending: isWritePending, writeContract } = useWriteContract();
-  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash });
-  const currentChain = chainId === 3889 ? kalyChainTestnet : kalyChainMainnet;
+  // Pin the receipt watcher to the PROPOSAL's chain (same as every read/write here), so
+  // the vote confirmation fires even if the bridge's active chain briefly lags.
+  const { data: receipt } = useWaitForTransactionReceipt({ hash: txHash, chainId: proposalChainId });
   const publicClient = usePublicClient();
 
-  // Get the correct contract addresses based on current network
-  const governorAddress = chainId === 3889
+  // Get the correct contract addresses based on the PROPOSAL's network
+  const governorAddress = proposalChainId === 3889
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
 
   const { data: balance } = useBalance({
     address,
-    token: chainId === 3889
+    chainId: proposalChainId,
+    token: proposalChainId === 3889
       ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
       : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN,
   });
 
-  // Get current block number
+  // Current block on the PROPOSAL's chain (so countdowns/period checks use the right
+  // chain, not the wallet's).
   const { data: currentBlock } = useBlockNumber({
+    chainId: proposalChainId,
     watch: true,
   });
 
-  const { data: deadline } = useReadContract({
+  // ── DAO subgraph: source of truth on mainnet ────────────────────────────────
+  // The subgraph gives proposer/blocks/votes/quorum/status/eta in ONE query, so we
+  // stop hitting the RPC per-proposal. Testnet has no subgraph, so there the
+  // on-chain reads below stay enabled as a fallback. `state` is DERIVED from the
+  // subgraph (deriveProposalState) for display; the on-chain `state()` read is kept
+  // lazy (enabled:false on mainnet) and only refetched on demand as the queue/execute
+  // gate, where an authoritative, lag-free value matters.
+  const daoSubgraphUrl = getDaoSubgraphUrl(proposalChainId);
+  const hasDaoSubgraph = !!daoSubgraphUrl;
+
+  const { data: sgData, refetch: refetchSubgraph } = useQuery({
+    queryKey: ['daoProposal', proposalChainId, id, address],
+    enabled: hasDaoSubgraph && !!safeProposalId,
+    refetchInterval: 12_000,
+    queryFn: async () => {
+      const [detail, voted] = await Promise.all([
+        queryProposalDetail(daoSubgraphUrl as string, id as string),
+        address ? queryHasVoted(daoSubgraphUrl as string, id as string, address) : Promise.resolve(false),
+      ]);
+      return { detail, voted };
+    },
+  });
+  const sgDetail = sgData?.detail ?? null;
+
+  const { data: deadlineOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
     functionName: 'proposalDeadline',
-    args: [BigInt(id || '0')],
-    chainId,
-    account: address
+    args: [safeProposalId ?? 0n],
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph },
   });
 
-  // Add effect to log deadline data
-  useEffect(() => {
-    if (deadline && currentBlock) {
-      console.log('Deadline from contract:', {
-        rawValue: deadline,
-        asNumber: Number(deadline),
-        currentBlock: Number(currentBlock || 0)
-      });
-    }
-  }, [deadline, currentBlock]);
-
-  const { data: proposer } = useReadContract({
+  const { data: proposerOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
     functionName: 'proposalProposer',
-    args: [BigInt(id || '0')],
-    chainId,
-    account: address
+    args: [safeProposalId ?? 0n],
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph },
   });
 
-  const { data: snapshot } = useReadContract({
+  const { data: snapshotOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
     functionName: 'proposalSnapshot',
-    args: [BigInt(id || '0')],
-    chainId,
-    account: address
+    args: [safeProposalId ?? 0n],
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph },
   });
 
-  const { data: rawVotes } = useReadContract({
+  const { data: rawVotesOnChain, refetch: refetchVotesOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
     functionName: 'proposalVotes',
-    args: [BigInt(id || '0')],
-    chainId,
-    account: address
+    args: [safeProposalId ?? 0n],
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph },
   });
 
-  const { data: state } = useReadContract({
+  // On-chain state(). On mainnet this NEVER auto-fires (enabled:false) — display state
+  // is derived from the subgraph — but refetchStateOnChain() still works on demand and
+  // is used as the authoritative queue/execute gate. On testnet it drives display.
+  const { data: stateOnChain, refetch: refetchStateOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
     functionName: 'state',
-    args: [BigInt(id || '0')],
-    chainId,
-    account: address
-  });
-
-  // Read timelock address from Governor
-  const { data: timelockAddress } = useReadContract({
-    address: governorAddress as `0x${string}`,
-    abi: governorABI,
-    functionName: 'timelock',
-    chainId,
-    account: address
-  });
-
-  // Read minDelay from Timelock
-  const { data: minDelay } = useReadContract({
-    address: timelockAddress as `0x${string}` | undefined, // Only run if timelockAddress is fetched
-    abi: timelockAbi,
-    functionName: 'getMinDelay',
-    chainId,
+    args: [safeProposalId ?? 0n],
+    chainId: proposalChainId,
     account: address,
-    query: {
-      enabled: !!timelockAddress,
-    }
+    query: { enabled: !hasDaoSubgraph },
   });
 
-  // Read proposal state for execution verification
-  const { data: proposalState, refetch: refetchProposalState } = useReadContract({
-    address: governorAddress as `0x${string}`,
-    abi: governorABI,
-    functionName: 'state',
-    args: id ? [BigInt(id)] : undefined,
-    chainId,
-    account: address,
-    query: { enabled: !!id }
-  });
-
-  // Read proposalEta (timestamp when it can be executed)
-  const { data: proposalEta } = useReadContract({
+  // Read proposalEta (timestamp when it can be executed) — testnet fallback only.
+  const { data: proposalEtaOnChain, refetch: refetchEtaOnChain } = useReadContract({
      address: governorAddress as `0x${string}`,
      abi: governorABI,
      functionName: 'proposalEta',
-     args: id ? [BigInt(id)] : undefined,
-     chainId,
+     args: safeProposalId != null ? [safeProposalId] : undefined,
+     chainId: proposalChainId,
      account: address,
      query: {
-       enabled: !!id && Number(state) === 5,
+       enabled: !hasDaoSubgraph && !!id && Number(stateOnChain) === 5,
      }
   });
+
+  // On-chain quorum at the snapshot block — testnet fallback only.
+  const { data: quorumRawOnChain } = useReadContract({
+    address: governorAddress as `0x${string}`,
+    abi: governorABI,
+    functionName: 'quorum',
+    args: snapshotOnChain ? [BigInt(snapshotOnChain)] : undefined,
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph && !!snapshotOnChain },
+  });
+
+  // On-chain "has this wallet already voted?" — testnet fallback only.
+  const { data: hasVotedOnChain, refetch: refetchHasVotedOnChain } = useReadContract({
+    address: governorAddress as `0x${string}`,
+    abi: governorABI,
+    functionName: 'hasVoted',
+    args: safeProposalId != null && address ? [safeProposalId, address] : undefined,
+    chainId: proposalChainId,
+    account: address,
+    query: { enabled: !hasDaoSubgraph && !!id && !!address },
+  });
+
+  // ── Merged values: subgraph on mainnet, on-chain reads on testnet ───────────
+  // Downstream code uses these names unchanged (deadline/snapshot/rawVotes/state/…).
+  const deadline = hasDaoSubgraph ? sgDetail?.voteEnd : deadlineOnChain;
+  const proposer = hasDaoSubgraph ? sgDetail?.proposer : proposerOnChain;
+  const snapshot = hasDaoSubgraph ? sgDetail?.voteStart : snapshotOnChain;
+  // Memoized: this array is a dependency of the data-fetch effect below, so a fresh
+  // reference each render would loop it forever (isLoading never settles).
+  const rawVotes = useMemo(
+    () =>
+      (hasDaoSubgraph
+        ? sgDetail
+          ? [sgDetail.againstVotes, sgDetail.forVotes, sgDetail.abstainVotes]
+          : undefined
+        : rawVotesOnChain) as readonly [bigint, bigint, bigint] | undefined,
+    [hasDaoSubgraph, sgDetail, rawVotesOnChain],
+  );
+  const quorumRaw = hasDaoSubgraph ? sgDetail?.quorumVotes : quorumRawOnChain;
+  const proposalEta = hasDaoSubgraph ? (sgDetail?.eta ?? undefined) : proposalEtaOnChain;
+  const onChainHasVoted = hasDaoSubgraph ? !!sgData?.voted : hasVotedOnChain;
+  // Live state: derived from the subgraph + current block on mainnet; on-chain on testnet.
+  const state = hasDaoSubgraph
+    ? (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined)
+    : stateOnChain;
+
+  // One refresh entry point: poke the subgraph on mainnet, the on-chain reads on testnet.
+  const refreshProposalData = useCallback(() => {
+    if (hasDaoSubgraph) {
+      void refetchSubgraph();
+      return;
+    }
+    void refetchStateOnChain?.();
+    void refetchVotesOnChain?.();
+    void refetchEtaOnChain?.();
+    if (address) void refetchHasVotedOnChain?.();
+  }, [hasDaoSubgraph, refetchSubgraph, refetchStateOnChain, refetchVotesOnChain, refetchEtaOnChain, refetchHasVotedOnChain, address]);
+
+  // Vote history from on-chain VoteCast truth (subgraph on mainnet, logs on testnet).
+  // Never reads Supabase, so reverted/ghost votes can never appear here.
+  const { votes: voteHistory, isLoading: isLoadingVotes } = useVoteHistory(
+    id,
+    governorAddress,
+    proposalChainId,
+    snapshot as bigint | undefined,
+    deadline as bigint | undefined,
+    refetchKey,
+  );
+
+  // Keep the lifecycle live: re-read on-chain state/votes/eta on every new block so
+  // Active -> Succeeded -> Queued -> Executed transitions surface automatically,
+  // without the user having to manually refresh. `currentBlock` advances via
+  // useBlockNumber({ watch: true }); the refetch fns from wagmi are stable.
+  useEffect(() => {
+    if (!currentBlock || !id) return;
+    // On mainnet the subgraph self-polls (refetchInterval) and state is derived from
+    // the advancing block — so there is NO per-block RPC. Only the testnet fallback
+    // re-reads on-chain here.
+    if (hasDaoSubgraph) return;
+    // Stop polling once the proposal is in a terminal state (Canceled/Defeated/
+    // Executed) — those never change, so per-block refetching is pure waste.
+    const terminal = [2, 3, 7].includes(Number(state));
+    if (terminal) return;
+    refetchStateOnChain?.();
+    refetchVotesOnChain?.();
+    if (address) refetchHasVotedOnChain?.();
+    if (Number(state) === 5) refetchEtaOnChain?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentBlock]);
+
+  // Increment the view count once per page view (keyed on the proposal id) — NOT on
+  // every block/vote refresh, which used to inflate the counter.
+  useEffect(() => {
+    if (!id) return;
+    supabase
+      .rpc('increment_proposal_views', { proposal_id_param: id })
+      .then(undefined, (e: unknown) => console.warn('Failed to increment views:', e));
+  }, [id]);
 
   // Parse the votes data
   const votes: ProposalVotes = {
@@ -380,29 +512,52 @@ const ProposalDetail = ({
     return Number(amount) / 10**18;
   };
 
-  // Calculate total votes with proper formatting
-  const formattedForVotes = dbVoteTotals?.votes_for || 0;
-  const formattedAgainstVotes = dbVoteTotals?.votes_against || 0;
-  const formattedAbstainVotes = dbVoteTotals?.votes_abstain || 0;
-  const totalVotes = formattedForVotes + formattedAgainstVotes + formattedAbstainVotes;
+  // Vote totals come from on-chain proposalVotes() (the source of truth), so the
+  // bars match the quorum box and stay correct on any network without a subgraph.
+  // Special legacy proposals (#1/#2) keep their injected Supabase values.
+  const displayVotes = resolveDisplayVotes({
+    isSpecial: isSpecialProposal(id),
+    onChain: {
+      forVotes: formatTokenAmount(votes.forVotes),
+      againstVotes: formatTokenAmount(votes.againstVotes),
+      abstainVotes: formatTokenAmount(votes.abstainVotes),
+    },
+    supabase: {
+      forVotes: dbVoteTotals?.votes_for || 0,
+      againstVotes: dbVoteTotals?.votes_against || 0,
+      abstainVotes: dbVoteTotals?.votes_abstain || 0,
+    },
+  });
+  const formattedForVotes = displayVotes.forVotes;
+  const formattedAgainstVotes = displayVotes.againstVotes;
+  const formattedAbstainVotes = displayVotes.abstainVotes;
+  const totalVotes = displayVotes.totalVotes;
 
   // Calculate voting percentages
   const forPercentage = totalVotes > 0 ? (formattedForVotes / totalVotes) * 100 : 0;
   const againstPercentage = totalVotes > 0 ? (formattedAgainstVotes / totalVotes) * 100 : 0;
   const abstainPercentage = totalVotes > 0 ? (formattedAbstainVotes / totalVotes) * 100 : 0;
 
+  // On-chain quorum status. OpenZeppelin's GovernorCountingSimple counts
+  // For + Abstain toward quorum (Against does not count).
+  const quorumRequired = quorumRaw !== undefined ? formatTokenAmount(quorumRaw as bigint) : null;
+  const quorumCurrent = formatTokenAmount(votes.forVotes + votes.abstainVotes);
+  const quorumMet = quorumRequired !== null && quorumCurrent >= quorumRequired;
+  const quorumProgress =
+    quorumRequired && quorumRequired > 0 ? Math.min(100, (quorumCurrent / quorumRequired) * 100) : 0;
+
   // Get the governance token contract
-  const governanceTokenAddress = chainId === 3889
+  const governanceTokenAddress = proposalChainId === 3889
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
 
   // Check delegation status
-  const { data: currentDelegate } = useReadContract({
+  const { data: currentDelegate, refetch: refetchDelegate } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
     abi: governanceTokenABI,
     functionName: 'delegates',
     args: [address || '0x0000000000000000000000000000000000000000'],
-    chainId,
+    chainId: proposalChainId,
     account: address
   });
 
@@ -422,7 +577,9 @@ const ProposalDetail = ({
 
     try {
       await delegate(address as `0x${string}`, writeContract);
-      setIsDelegated(true);
+      // Don't optimistically assume success — re-read the on-chain delegate so
+      // isDelegated reflects reality (a rejected/failed delegation stays false).
+      setTimeout(() => refetchDelegate?.(), 3000);
     } catch (err) {
       console.error('Failed to delegate:', err);
       setDelegateError(err instanceof Error ? err.message : 'Failed to delegate voting power');
@@ -478,20 +635,19 @@ const ProposalDetail = ({
         const tryFetchProposal = async (proposalId: string) => {
           if (!proposalId) return null;
 
-          console.log('Trying to fetch proposal with ID:', proposalId);
+          // Query by proposal_id ALONE — proposal ids are globally unique hashes, so
+          // a proposal must be found regardless of which network the wallet is on
+          // (it carries its own chain_id, used for the on-chain reads below).
           const { data, error } = await supabase
             .from('proposals')
             .select('*, targets, values, calldatas, full_description')
             .eq('proposal_id', proposalId)
-            .eq('chain_id', chainId)
             .single();
 
           if (error) {
             console.log('Error fetching with ID', proposalId, ':', error.message);
             return null;
           }
-
-          console.log('Found proposal with ID', proposalId, ':', data);
           return data;
         };
 
@@ -512,43 +668,10 @@ const ProposalDetail = ({
           proposal = await tryFetchProposal(noLeadingZeros);
         }
 
-        // If still not found, try a broader search
-        if (!proposal) {
-          console.log('Proposal not found with exact ID match, trying broader search');
-          const { data: allProposals, error } = await supabase
-            .from('proposals')
-            .select('*');
-
-          if (!error && allProposals && allProposals.length > 0) {
-            console.log(`Found ${allProposals.length} proposals in database:`,
-              allProposals.map(p => ({ id: p.id, proposal_id: p.proposal_id, title: p.title }))
-            );
-
-            // Try to find a partial match on the ID
-            proposal = allProposals.find(p => {
-              const pid = p.proposal_id.toString();
-              const matches = pid.includes(proposalIdForSupabase) ||
-                proposalIdForSupabase.includes(pid) ||
-                (lastProposalIdDecimal && pid.includes(lastProposalIdDecimal)) ||
-                (lastProposalIdHex && pid.includes(lastProposalIdHex));
-
-              if (matches) {
-                console.log('Found partial match:', {
-                  proposal_id: p.proposal_id,
-                  query_id: proposalIdForSupabase
-                });
-              }
-
-              return matches;
-            });
-
-            if (proposal) {
-              console.log('Found proposal with partial match:', proposal);
-            }
-          } else {
-            console.log('No proposals found in database or error occurred');
-          }
-        }
+        // (Removed the loose "broader search" partial-match fallback — it loaded a
+        // DIFFERENT proposal when the exact id wasn't found on the wallet's chain,
+        // showing the wrong proposal's metadata. If the id isn't found, it's not
+        // found.)
 
         if (!proposal) {
           throw new Error(`Proposal not found with ID ${id}`);
@@ -556,14 +679,8 @@ const ProposalDetail = ({
 
         setProposalData(proposal);
 
-        // Increment view count
-        try {
-          await supabase.rpc('increment_proposal_views', {
-            proposal_id_param: proposal.proposal_id
-          });
-        } catch (viewErr) {
-          console.warn('Failed to increment views:', viewErr);
-        }
+        // (View count is incremented once per page view in a separate effect, not
+        // here — this effect re-runs on every block/vote change, which inflated it.)
 
         // Update on-chain data in Supabase if needed
         if (proposal && rawVotes && snapshot && deadline && state !== undefined) {
@@ -586,7 +703,9 @@ const ProposalDetail = ({
             Math.abs(proposal.votes_for - dbVotesFor) > 0.001 ||
             Math.abs(proposal.votes_against - dbVotesAgainst) > 0.001 ||
             Math.abs(proposal.votes_abstain - dbVotesAbstain) > 0.001 ||
-            proposal.state !== state.toString() ||
+            // Compare label-to-label; the old code compared a label ("Active") to a
+            // numeric string ("1"), so this was always true and wrote every run.
+            proposal.state !== getProposalState(Number(state)) ||
             proposal.snapshot_timestamp !== Number(snapshot) ||
             proposal.deadline_timestamp !== Number(deadline);
 
@@ -648,11 +767,8 @@ const ProposalDetail = ({
     fetchProposalData();
   }, [id, rawVotes, state, snapshot, deadline, chainId]);
 
-  // Special proposal IDs that need to show as Succeeded
-  const specialProposalIds = [
-    '12623673203887461246269581229455579568013705045965966107251015964351781522822',
-    '106263624122153916398275663853816204925483415506769348757861184086135002881292'
-  ];
+  // Special proposal IDs that need to show as Succeeded (shared single source).
+  const specialProposalIds = SPECIAL_PROPOSAL_IDS;
 
   // Update getProposalState to handle numeric states
   const getProposalState = (state: number | string): string => {
@@ -686,20 +802,12 @@ const ProposalDetail = ({
       });
     }
 
-    // If it's a block number, calculate estimated date
-    // Average block time is 2 seconds for KalyChain
+    // If it's a block number, calculate estimated date.
+    // Average block time is 2 seconds for KalyChain. While currentBlock is still
+    // loading, don't compute a wildly-wrong date off block 0.
     const AVERAGE_BLOCK_TIME = 2; // seconds
-    const blockDifference = Number(dateString) - Number(currentBlock || 0);
-
-    console.log('Date calculation debug:', {
-      targetBlock: Number(dateString),
-      currentBlock: Number(currentBlock || 0),
-      blockDifference,
-      secondsUntil: blockDifference * AVERAGE_BLOCK_TIME,
-      daysUntil: (blockDifference * AVERAGE_BLOCK_TIME) / (60 * 60 * 24),
-      estimatedDate: new Date(Date.now() + (blockDifference * AVERAGE_BLOCK_TIME * 1000)).toLocaleString()
-    });
-
+    if (!currentBlock) return 'Calculating…';
+    const blockDifference = Number(dateString) - Number(currentBlock);
     const secondsUntil = blockDifference * AVERAGE_BLOCK_TIME;
     const estimatedDate = new Date(Date.now() + (secondsUntil * 1000));
     return estimatedDate.toLocaleDateString("en-US", {
@@ -732,6 +840,7 @@ const ProposalDetail = ({
       return;
     }
 
+    lastActionRef.current = 'vote';
     setIsSubmitting(true);
     setVoteStatus('Preparing transaction...');
     try {
@@ -753,14 +862,20 @@ const ProposalDetail = ({
       setShowVoteDialog(false);
     } catch (err) {
       console.error('Failed to vote:', err);
-      setError(err instanceof Error ? err.message : 'Failed to vote on proposal');
+      // Route to a toast/voteStatus, NOT the page-level `error` (which unmounts the
+      // whole proposal page).
+      lastActionRef.current = null;
+      setIsSubmitting(false);
       setVoteStatus(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      // Keep isSubmitting true until transaction is confirmed or errors
-      if (!txHash) {
-        setIsSubmitting(false);
-      }
+      toast({
+        title: 'Vote failed',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      });
     }
+    // NOTE: isSubmitting stays true through the pending tx; it is cleared on a
+    // confirmed receipt (vote handler) or on writeError. This keeps the vote
+    // controls hidden during the pending window (no double-fire).
   };
 
   // Status badge color
@@ -780,9 +895,9 @@ const ProposalDetail = ({
         case 'Defeated': return "bg-red-100 text-red-800";
         case 'Succeeded': return "bg-green-100 text-green-800";
         case 'Queued': return "bg-blue-100 text-blue-800";
-        case 'Expired': return "bg-gray-100 text-gray-800";
+        case 'Expired': return "bg-secondary text-foreground";
         case 'Executed': return "bg-purple-100 text-purple-800";
-        default: return "bg-gray-100 text-gray-800";
+        default: return "bg-secondary text-foreground";
       }
     }
 
@@ -794,24 +909,32 @@ const ProposalDetail = ({
       case 3: return "bg-red-100 text-red-800";       // Defeated
       case 4: return "bg-green-100 text-green-800";   // Succeeded
       case 5: return "bg-blue-100 text-blue-800";     // Queued
-      case 6: return "bg-gray-100 text-gray-800";     // Expired
+      case 6: return "bg-secondary text-foreground";     // Expired
       case 7: return "bg-purple-100 text-purple-800"; // Executed
-      default: return "bg-gray-100 text-gray-800";
+      default: return "bg-secondary text-foreground";
     }
   };
 
   // Check if voting is allowed
   const canVote = () => {
     if (!isConnected) return false;
+    // Wallet must be on the proposal's network to actually submit a vote.
+    if (isWrongNetwork) return false;
+    // On-chain truth: if this wallet already voted, never show the controls again
+    // (survives reloads and the block-watch refetch). Falls back to the session
+    // `userVote` for the same tab before the on-chain read refreshes.
+    if (onChainHasVoted) return false;
     if (userVote) return false;
+    // A vote tx is in flight — keep controls hidden so the user can't double-fire.
+    if (isSubmitting) return false;
     if (userVotingPower <= 0) return false;
 
-    // Get current block number
-    const currentBlock = snapshot ? Number(snapshot) : 0;
+    // Voting period check against the real chain head (the old code mistakenly used
+    // `snapshot` as the current block, making this always true).
+    const head = currentBlock ? Number(currentBlock) : 0;
+    const start = snapshot ? Number(snapshot) : 0;
     const proposalDeadline = deadline ? Number(deadline) : 0;
-
-    // Check if we're within the voting period
-    const isVotingPeriod = currentBlock <= proposalDeadline;
+    const isVotingPeriod = head >= start && head <= proposalDeadline;
 
     // Convert state to number if it's a string
     const numericState = typeof state === 'string' ?
@@ -821,39 +944,6 @@ const ProposalDetail = ({
     // Only allow voting if state is Active (1)
     // Note: Pending (0) means we're in the delay period and voting hasn't started yet
     return numericState === 1 && isVotingPeriod;
-  };
-
-  // Keep checkProposalState function
-  const checkProposalState = async (proposalId: string): Promise<number | null> => {
-    // Implementation simplified to avoid multi-RPC calls
-    try {
-      if (!governorAddress) return null;
-
-      console.log(`Checking state for proposal ID ${proposalId} on-chain...`);
-
-      // Create a provider
-      const provider = new ethers.providers.JsonRpcProvider(
-        currentChain?.rpcUrls.default.http[0]
-      );
-
-      // Create contract interface
-      const governor = new ethers.Contract(
-        governorAddress,
-        governorABI,
-        provider
-      );
-
-      // Call state function
-      const state = await governor.state(proposalId.toString());
-      const stateNumber = Number(state);
-
-      console.log(`Proposal state on-chain: ${stateNumber} (${getProposalState(stateNumber)})`);
-
-      return stateNumber;
-    } catch (err) {
-      console.error("Error checking proposal state:", err);
-      return null;
-    }
   };
 
   // Keep proposalCreatedEventAbi definition
@@ -886,6 +976,7 @@ const ProposalDetail = ({
   // Hook to wait for queue/execute transaction confirmation
   const { isLoading: isConfirming, isSuccess: isConfirmed, error: confirmationError } = useWaitForTransactionReceipt({
     hash: queueExecuteHash,
+    chainId: proposalChainId,
   });
 
   // Effect to handle transaction confirmation and update database
@@ -894,18 +985,20 @@ const ProposalDetail = ({
       console.log(`Transaction ${queueExecuteHash} confirmed!`);
       toast({ title: "Transaction Confirmed", description: "Blockchain updated successfully." });
 
-      // Determine the new state based on which action was performed
-      // We need a way to know if it was queue or execute that succeeded
-      // Option 1: Add state variable like `lastAction: 'queue' | 'execute' | null`
-      // Option 2: Infer from current proposal state (less reliable if UI state is stale)
-      // Let's assume we can infer for now, but Option 1 is better.
-      const currentStateNum = Number(state);
+      // Refresh so the lifecycle panel advances (Succeeded -> Queued -> Executed)
+      // right away — the subgraph on mainnet, on-chain reads on testnet.
+      refreshProposalData();
+
+      // Use the action we actually fired (set in handleQueue/handleExecute), NOT the
+      // current `state` — the block-watcher may already have advanced it, which used
+      // to make a queue write "Executed" to the DB.
       let newStateText: string | null = null;
-      if (currentStateNum === 4) { // If current state was Succeeded, the action was queue
+      if (lastActionRef.current === 'queue') {
           newStateText = getProposalState(5); // Queued
-      } else if (currentStateNum === 5) { // If current state was Queued, the action was execute
+      } else if (lastActionRef.current === 'execute') {
           newStateText = getProposalState(7); // Executed
       }
+      lastActionRef.current = null;
 
       if (newStateText && proposalData) {
         console.log(`Updating database state to ${newStateText} after confirmation.`);
@@ -943,14 +1036,18 @@ const ProposalDetail = ({
     }
   }, [isConfirmed, confirmationError, queueExecuteHash, state, proposalData]); // Add dependencies
 
-  // Effect to capture the transaction hash after writeContract is called
+  // Route a submitted tx into the queue/execute confirm pipeline ONLY when the
+  // in-flight action is queue/execute. Votes use the separate vote handler, so we
+  // must not pull a vote tx in here (that showed queue/execute toasts for votes).
   useEffect(() => {
-    if (txHash) {
-      console.log("Transaction submitted, hash:", txHash);
+    if (txHash && (lastActionRef.current === 'queue' || lastActionRef.current === 'execute')) {
+      console.log("Queue/execute tx submitted, hash:", txHash);
       setQueueExecuteHash(txHash);
-      // Reset isQueueing/isExecuting here as isWritePending will become false,
-      // and isConfirming will take over the loading state.
-      // We check which button was active to reset the correct one.
+      toast({
+        title: 'Transaction submitted',
+        description: 'Waiting for on-chain confirmation…',
+      });
+      // isWritePending becomes false; isConfirming takes over the button state.
       if (isQueueing) setIsQueueing(false);
       if (isExecuting) setIsExecuting(false);
     }
@@ -963,6 +1060,7 @@ const ProposalDetail = ({
       return;
     }
 
+    lastActionRef.current = 'queue';
     setIsQueueing(true);
     setQueueExecuteError(null);
 
@@ -973,6 +1071,20 @@ const ProposalDetail = ({
       const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
       const values = (proposalData?.values || []).map(v => BigInt(v));
       const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
+
+      // Preflight: a proposal with missing/mismatched execution data would revert
+      // with a cryptic "unknown proposal id". Fail clearly instead.
+      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
+        lastActionRef.current = null;
+        setIsQueueing(false);
+        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be queued.');
+        toast({
+          title: 'Cannot queue',
+          description: 'This proposal is missing its on-chain execution data.',
+          variant: 'destructive',
+        });
+        return;
+      }
 
       // Get the ORIGINAL full description text (not the hash)
       const descriptionText = proposalData?.full_description ||
@@ -1035,16 +1147,20 @@ const ProposalDetail = ({
       return;
     }
 
+    lastActionRef.current = 'execute';
     setIsExecuting(true);
     setQueueExecuteError(null);
 
     try {
-      // Refresh the state to make sure we have the latest data
-      await refetchProposalState?.();
+      // Authoritative on-chain state() read, on demand — the queue/execute gate.
+      // This is the one RPC read we deliberately keep (even on mainnet, where display
+      // is subgraph-derived) because acting on a lagging state would revert the tx.
+      const refreshed = await refetchStateOnChain?.();
+      const freshState = refreshed?.data ?? state;
 
-      // Check proposal state using the data from the hook
-      if (proposalState !== undefined && Number(proposalState) !== 5) { // 5 = Queued
-        const stateMessage = `Current state: ${getProposalState(Number(proposalState))} (${proposalState})`;
+      // Must be Queued (5) to execute.
+      if (freshState !== undefined && Number(freshState) !== 5) {
+        const stateMessage = `Current state: ${getProposalState(Number(freshState))} (${freshState})`;
         console.error(`Proposal not in Queued state. ${stateMessage}`);
         throw new Error(`Invalid proposal state: ${stateMessage}. Must be Queued (5).`);
       }
@@ -1060,6 +1176,19 @@ const ProposalDetail = ({
       const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
       const values = (proposalData?.values || []).map(v => BigInt(v));
       const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
+
+      // Preflight (same as queue): missing/mismatched execution data → clear error.
+      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
+        lastActionRef.current = null;
+        setIsExecuting(false);
+        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be executed.');
+        toast({
+          title: 'Cannot execute',
+          description: 'This proposal is missing its on-chain execution data.',
+          variant: 'destructive',
+        });
+        return;
+      }
 
       // Get the ORIGINAL full description text (not the hash)
       const descriptionText = proposalData?.full_description ||
@@ -1091,7 +1220,12 @@ const ProposalDetail = ({
         args: [targets, values, calldatas, descriptionHash],
         chain: currentChain,
         account: address,
-        ...gasConfig
+        ...gasConfig,
+        // execute() RUNS the proposal's on-chain actions (transfers, param changes,
+        // possibly several), so the default 300k is far too low and an action proposal
+        // would revert out-of-gas. Give generous headroom (unused gas is refunded);
+        // matches kaly-vault's heavy-tx limit.
+        gas: 3_000_000n,
       });
 
       console.log('Execute transaction initiated');
@@ -1116,757 +1250,43 @@ const ProposalDetail = ({
     }
   };
 
-  // Add a manual execution fallback function that uses ethers.js directly
-  const executeManually = async (
-    targets: `0x${string}`[],
-    values: bigint[],
-    calldatas: `0x${string}`[],
-    descriptionHash: string
-  ) => {
-    try {
-      if (!governorAddress || !address) return;
-
-      console.log("=== MANUAL EXECUTION DEBUG MODE ===");
-      console.log("Using ethers.js to directly call the contract...");
-
-      // Create provider and signer
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
-      const signer = provider.getSigner(address);
-
-      // Create contract instance
-      const governorContract = new ethers.Contract(
-        governorAddress,
-        governorABI,
-        signer
-      );
-
-      // Convert parameters to proper format for ethers.js
-      const targetAddresses = targets.map(t => t.toString());
-      const valuesBigNumber = values.map(v => ethers.BigNumber.from(v.toString()));
-      const calldata = calldatas.map(c => c.toString());
-
-      console.log("Calling execute function directly with parameters:");
-      console.log("- targets:", targetAddresses);
-      console.log("- values:", valuesBigNumber.map(v => v.toString()));
-      console.log("- calldatas:", calldata);
-      console.log("- descriptionHash:", descriptionHash);
-
-      // Specify higher gas limit
-      const tx = await governorContract.execute(
-        targetAddresses,
-        valuesBigNumber,
-        calldata,
-        descriptionHash,
-        {
-          gasLimit: 3000000,
-          gasPrice: ethers.utils.parseUnits('2', 'gwei')
-        }
-      );
-
-      console.log("Manual transaction submitted:", tx.hash);
-      return tx.hash;
-    } catch (err) {
-      console.error("Error in manual execution:", err);
-      const errorMessage = err.message || String(err);
-
-      // Special handling for specific errors
-      if (errorMessage.includes("unknown proposal id")) {
-        console.error("FOUND 'unknown proposal id' ERROR IN MANUAL EXECUTION");
-        toast({
-          title: "ERROR: Unknown Proposal ID",
-          description: "The contract could not find this proposal ID on-chain.",
-          variant: "destructive"
-        });
-      } else if (errorMessage.includes("TimelockController")) {
-        console.error("FOUND TIMELOCK CONTROLLER ERROR IN MANUAL EXECUTION");
-        toast({
-          title: "ERROR: Timelock Issue",
-          description: errorMessage,
-          variant: "destructive"
-        });
-      }
-
-      throw err;
+  // Vote confirmation handler.
+  //
+  // IMPORTANT: only act on a SUCCESSFUL receipt. `useWaitForTransactionReceipt`
+  // also resolves for REVERTED txs (e.g. "already voted") — recording those was
+  // the source of the "ghost votes". We no longer write votes to Supabase at all:
+  // the vote totals and Vote History are read from on-chain `VoteCast` (subgraph
+  // on mainnet, logs on testnet), so ghosts are structurally impossible. We only
+  // update local UI state and re-read the chain.
+  useEffect(() => {
+    // Only react to a VOTE tx — the shared write hook is also used by queue/execute,
+    // and reacting to those here is what created phantom ABSTAIN rows from queue txs.
+    if (receipt && txHash && receipt.status === 'success' && lastActionRef.current === 'vote') {
+      lastActionRef.current = null;
+      setIsSubmitting(false);
+      setUserVote(voteDirection);
+      refreshProposalData(); // subgraph (mainnet) / on-chain (testnet): updates votes + has-voted
+      setRefetchKey(prev => prev + 1); // refresh on-chain vote history
     }
-  };
+  }, [receipt, txHash, voteDirection]);
 
-  // Add a helper function to check if a proposal exists directly
-  const checkProposalExistsDirectly = async (proposalId: string) => {
-    if (!governorAddress) {
-      toast({
-        title: "Error",
-        description: "Governor contract address not found",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setQueueExecuteError("Checking proposal existence on-chain...");
-
-    try {
-      // Use ethers.js to call directly
-      const provider = new ethers.providers.JsonRpcProvider(
-        currentChain?.rpcUrls.default.http[0]
-      );
-
-      const governor = new ethers.Contract(
-        governorAddress,
-        governorABI,
-        provider
-      );
-
-      try {
-        console.log(`Checking if proposal ${proposalId} exists by calling state()...`);
-
-        // Try to get the state - will fail if proposal doesn't exist
-        const state = await governor.state(proposalId);
-        const stateNum = Number(state);
-        const stateName = getProposalState(stateNum);
-
-        console.log(`Proposal EXISTS! State: ${stateNum} (${stateName})`);
-
-        // Try to get additional info
-        try {
-          const snapshot = await governor.proposalSnapshot(proposalId);
-          console.log(`Snapshot: ${snapshot}`);
-        } catch (err) {
-          console.log("Could not get snapshot");
-        }
-
-        try {
-          const deadline = await governor.proposalDeadline(proposalId);
-          console.log(`Deadline: ${deadline}`);
-        } catch (err) {
-          console.log("Could not get deadline");
-        }
-
-        // Success!
-        setQueueExecuteError(`Proposal FOUND on-chain! State: ${stateName} (${stateNum})`);
-        toast({
-          title: "Proposal Exists",
-          description: `State: ${stateName}`,
-          variant: "default"
-        });
-
-        return true;
-      } catch (err) {
-        console.error("Error checking proposal:", err);
-
-        if (err.message?.includes("unknown proposal id")) {
-          console.error(`Proposal ${proposalId} does NOT exist on-chain!`);
-          setQueueExecuteError(`Proposal ID ${proposalId} NOT FOUND on-chain! Error: unknown proposal id`);
-          toast({
-            title: "Proposal Not Found",
-            description: "This proposal ID does not exist on-chain",
-            variant: "destructive"
-          });
-        } else {
-          setQueueExecuteError(`Error checking proposal: ${err.message || String(err)}`);
-          toast({
-            title: "Error",
-            description: err.message || "Unknown error checking proposal",
-            variant: "destructive"
-          });
-        }
-
-        return false;
-      }
-    } catch (err) {
-      console.error("Provider or contract error:", err);
-      setQueueExecuteError(`Provider error: ${err.message || String(err)}`);
-      toast({
-        title: "Network Error",
-        description: "Could not connect to blockchain",
-        variant: "destructive"
-      });
-      return false;
-    }
-  };
-
-  // Add function to directly calculate proposal ID using contract
-  const calculateProposalIdFromContract = async () => {
-    if (!governorAddress || !proposalData?.targets || !proposalData?.values || !proposalData?.calldatas) {
-      toast({
-        title: "Missing Data",
-        description: "Proposal data is incomplete",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setQueueExecuteError("Calculating proposal ID from contract...");
-
-    try {
-      // Use ethers.js to call directly
-      const provider = new ethers.providers.JsonRpcProvider(
-        currentChain?.rpcUrls.default.http[0]
-      );
-
-      const governor = new ethers.Contract(
-        governorAddress,
-        governorABI,
-        provider
-      );
-
-      // Convert parameters
-      const targets = proposalData.targets.map(t => t);
-      const values = proposalData.values.map(v => ethers.BigNumber.from(v));
-      const calldatas = proposalData.calldatas.map(c => c);
-
-      // Try different description hash calculations
-      const descriptionOptions = [];
-
-      // Option 1: Full description
-      if (proposalData.full_description) {
-        descriptionOptions.push({
-          name: "Full Description",
-          text: proposalData.full_description,
-          hash: ethers.utils.id(proposalData.full_description)
-        });
-      }
-
-      // Option 2: Title + Description
-      const titleAndDesc = `${proposalData.title}\n\n${proposalData.description}`;
-      descriptionOptions.push({
-        name: "Title + Description",
-        text: titleAndDesc,
-        hash: ethers.utils.id(titleAndDesc)
-      });
-
-      // Option 3: Description only
-      descriptionOptions.push({
-        name: "Description Only",
-        text: proposalData.description,
-        hash: ethers.utils.id(proposalData.description)
-      });
-
-      // For testing - set different values
-      const hashResults = [];
-      const knownWorkingId = "12408497541758715116290134275497952213534845109460495001490387279328663224184";
-
-      // Try each description hash
-      for (const option of descriptionOptions) {
-        try {
-          console.log(`\nTrying with ${option.name}:`);
-          console.log(`Description text: "${option.text.substring(0, 50)}..."`);
-          console.log(`Description hash: ${option.hash}`);
-
-          const calculatedId = await governor.hashProposal(
-            targets,
-            values,
-            calldatas,
-            option.hash
-          );
-
-          const idMatch = calculatedId.toString() === knownWorkingId;
-
-          console.log(`Contract calculated ID: ${calculatedId.toString()}`);
-          console.log(`Matches known ID? ${idMatch ? "YES ✓" : "NO ✗"}`);
-
-          hashResults.push({
-            name: option.name,
-            hash: option.hash,
-            id: calculatedId.toString(),
-            matches: idMatch
-          });
-        } catch (err) {
-          console.error(`Error with ${option.name}:`, err);
-          hashResults.push({
-            name: option.name,
-            hash: option.hash,
-            id: "ERROR",
-            matches: false,
-            error: err.message
-          });
-        }
-      }
-
-      // Log summary
-      console.log("\n=== HASH CALCULATION SUMMARY ===");
-      hashResults.forEach(result => {
-        console.log(`${result.name}: ${result.id} - ${result.matches ? "MATCH ✓" : "NO MATCH ✗"}`);
-      });
-
-      // Show results
-      setQueueExecuteError(
-        `Proposal ID Calculation Results:\n` +
-        hashResults.map(r => `${r.name}: ${r.id} - ${r.matches ? "MATCH" : "NO MATCH"}`).join("\n")
-      );
-
-      // Show toast with best result
-      const bestMatch = hashResults.find(r => r.matches);
-      if (bestMatch) {
-        toast({
-          title: "Found Matching ID!",
-          description: `${bestMatch.name} creates the correct ID`,
-          variant: "default"
-        });
-      } else {
-        toast({
-          title: "No Match Found",
-          description: "None of the calculated IDs match the expected ID",
-          variant: "destructive"
-        });
-      }
-
-    } catch (err) {
-      console.error("Error calculating proposal ID:", err);
-      setQueueExecuteError(`Error calculating ID: ${err.message || String(err)}`);
-      toast({
-        title: "Calculation Error",
-        description: err.message || "Unknown error",
-        variant: "destructive"
-      });
-    }
-  };
-
-  // Direct raw execution with no transforms whatsoever
-  const executeRawWithUrlId = async () => {
-    if (!governorAddress || !id || !address) {
-      toast({
-        title: "Error",
-        description: "Missing required data (governor, ID, or account)",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setIsExecuting(true);
-    setQueueExecuteError("Executing with raw ID from URL...");
-
-    try {
-      // The ID directly from the URL with NO processing/transformation
-      const rawId = id;
-      console.log(`Executing with RAW ID directly from URL: ${rawId}`);
-
-      // Get proposal data from Supabase
-      if (!proposalData?.targets || !proposalData?.values || !proposalData?.calldatas) {
-        throw new Error("Missing proposal parameter data");
-      }
-
-      // Convert to correct types with minimal processing
-      const targets = proposalData.targets.map(t => t as `0x${string}`);
-      const values = proposalData.values.map(v => BigInt(v));
-      const calldatas = proposalData.calldatas.map(c => c as `0x${string}`);
-      const descriptionHash = proposalData.full_description
-        ? ethers.utils.id(proposalData.full_description) as `0x${string}`
-        : ethers.utils.id(`${proposalData.title}\n\n${proposalData.description}`) as `0x${string}`;
-
-      console.log("=== DIRECT RAW EXECUTION ===");
-      console.log("Using RAW ID from URL with no transformations");
-      console.log("Targets:", targets);
-      console.log("Values:", values.map(v => v.toString()));
-      console.log("Calldatas:", calldatas.map(c => `${c.slice(0, 10)}...${c.slice(-8)}`));
-      console.log("DescriptionHash:", descriptionHash);
-
-      toast({
-        title: "Direct Execution",
-        description: "Executing with raw ID from URL...",
-      });
-
-      // Try BOTH ethers.js and wagmi/viem approaches
-
-      // 1. First try ethers.js direct call
-      try {
-        const provider = new ethers.providers.Web3Provider(window.ethereum);
-        const signer = provider.getSigner(address);
-        const governor = new ethers.Contract(governorAddress, governorABI, signer);
-
-        // Convert to ethers.js format
-        const targetAddrs = targets.map(t => t.toString());
-        const valuesBN = values.map(v => ethers.BigNumber.from(v.toString()));
-        const calldata = calldatas.map(c => c.toString());
-
-        // First check if the proposal exists (read-only call)
-        try {
-          const state = await governor.state(rawId);
-          console.log(`Proposal exists! State: ${state} (${getProposalState(Number(state))})`);
-        } catch (stateErr) {
-          console.error("State check failed:", stateErr.message);
-          if (stateErr.message.includes("unknown proposal id")) {
-            throw new Error("Proposal doesn't exist on this network with this ID");
-          }
-        }
-
-        // Execute directly
-        const tx = await governor.execute(
-          targetAddrs,
-          valuesBN,
-          calldata,
-          descriptionHash,
-          {
-            gasLimit: 3000000,
-            gasPrice: ethers.utils.parseUnits('2', 'gwei')
-          }
-        );
-
-        console.log("Raw execution transaction submitted:", tx.hash);
-        toast({
-          title: "Transaction Submitted",
-          description: `Tx: ${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}`,
-        });
-        return; // Success!
-      } catch (ethersErr) {
-        console.error("Ethers.js execution failed:", ethersErr);
-        console.log("Falling back to wagmi/viem...");
-      }
-
-      // 2. Fallback to wagmi/viem if ethers.js fails
-      writeContract({
-        address: governorAddress as `0x${string}`,
-        gas: 3000000n,
-        gasPrice: BigInt(Math.floor(2 * 1e9)),
-        abi: governorABI,
-        functionName: 'execute',
-        args: [targets, values, calldatas, descriptionHash],
-        chain: currentChain,
-        account: address,
-      });
-
-    } catch (err) {
-      console.error("Raw execution error:", err);
-      setQueueExecuteError(`Raw execution error: ${err.message || String(err)}`);
-      toast({
-        title: "Execution Error",
-        description: err.message || "Unknown error",
-        variant: "destructive"
-      });
+  // Reset in-flight state when any write (vote/queue/execute) fails at submit time
+  // (e.g. wallet rejection). Without this the controls stay stuck/hidden.
+  useEffect(() => {
+    if (writeError) {
+      console.error('Write failed:', writeError);
+      lastActionRef.current = null;
+      setIsSubmitting(false);
+      setIsQueueing(false);
       setIsExecuting(false);
-    }
-  };
-
-  // Verify network settings and contracts
-  const verifyNetworkAndContracts = async () => {
-    setQueueExecuteError("Verifying network settings and contracts...");
-
-    try {
-      // Check current network
-      const currentChainId = chainId || 0;
-      console.log(`Current chain ID: ${currentChainId}`);
-
-      if (currentChainId === 0) {
-        throw new Error("Not connected to any network");
-      }
-
-      if (!governorAddress) {
-        throw new Error("Governor contract address not found for this network");
-      }
-
-      console.log(`Governor contract address: ${governorAddress}`);
-
-      // Check if the contract exists on this network
-      const provider = new ethers.providers.JsonRpcProvider(
-        currentChain?.rpcUrls.default.http[0]
-      );
-
-      // Check contract code
-      const code = await provider.getCode(governorAddress);
-      if (code === '0x') {
-        throw new Error(`No contract exists at address ${governorAddress} on this network!`);
-      }
-
-      console.log("✅ Governor contract exists on this network");
-
-      // Try to get the name
-      try {
-        const governor = new ethers.Contract(
-          governorAddress,
-          governorABI,
-          provider
-        );
-
-        // Try some basic read calls
-        try {
-          const name = await governor.name();
-          console.log(`Governor name: ${name}`);
-        } catch (nameErr) {
-          console.log("Could not get governor name");
-        }
-
-        try {
-          const proposalCount = await governor.proposalCount();
-          console.log(`Proposal count: ${proposalCount}`);
-        } catch (countErr) {
-          console.log("Could not get proposal count");
-        }
-
-        // Try to get the timelock address
-        try {
-          const timelock = await governor.timelock();
-          console.log(`Timelock address: ${timelock}`);
-
-          // Check if timelock contract exists
-          const timelockCode = await provider.getCode(timelock);
-          if (timelockCode === '0x') {
-            console.log(`⚠️ WARNING: No timelock contract exists at ${timelock}`);
-          } else {
-            console.log("✅ Timelock contract exists");
-          }
-        } catch (timelockErr) {
-          console.log("Could not get timelock address");
-        }
-
-        // Check the proposal state if we have an ID
-        if (id) {
-          try {
-            const state = await governor.state(id);
-            console.log(`✅ PROPOSAL FOUND! State: ${state} (${getProposalState(Number(state))})`);
-
-            // Try to get proposal snapshot and deadline
-            try {
-              const snapshot = await governor.proposalSnapshot(id);
-              const deadline = await governor.proposalDeadline(id);
-              console.log(`Snapshot: ${snapshot}, Deadline: ${deadline}`);
-            } catch (detailsErr) {
-              console.log("Could not get proposal details");
-            }
-
-            setQueueExecuteError(
-              `Proposal VERIFIED on-chain! State: ${getProposalState(Number(state))} (${state})`
-            );
-
-            toast({
-              title: "Proposal Verified",
-              description: `Found on network ${currentChainId} with state: ${getProposalState(Number(state))}`,
-            });
-
-            return true;
-          } catch (stateErr) {
-            console.error("Error getting proposal state:", stateErr);
-            if (stateErr.message?.includes("unknown proposal id")) {
-              throw new Error(`Proposal ID ${id} does NOT exist on this network!`);
-            }
-            throw stateErr;
-          }
-        }
-
-        setQueueExecuteError(
-          `Network and contracts verified. Chain: ${currentChainId}, Governor: ${governorAddress}`
-        );
-
-        toast({
-          title: "Verification Complete",
-          description: "All contracts exist and are accessible",
-        });
-
-        return true;
-      } catch (contractErr) {
-        console.error("Contract interaction error:", contractErr);
-        throw new Error(`Contract error: ${contractErr.message || String(contractErr)}`);
-      }
-    } catch (err) {
-      console.error("Verification error:", err);
-      setQueueExecuteError(`Verification error: ${err.message || String(err)}`);
+      const msg = (writeError as { shortMessage?: string }).shortMessage || writeError.message;
       toast({
-        title: "Verification Failed",
-        description: err.message || "Unknown error",
-        variant: "destructive"
-      });
-      return false;
-    }
-  };
-
-  // Add a completely bare-bones execution attempt
-  const executeBareBones = async () => {
-    try {
-      if (!window.ethereum || !governorAddress || !id || !proposalData) {
-        toast({
-          title: "Missing Data",
-          description: "Required data is missing",
-          variant: "destructive"
-        });
-        return;
-      }
-
-      console.log("Starting BARE BONES execution attempt...");
-      setQueueExecuteError("Attempting bare-bones execution with minimal code...");
-
-      // Use the raw ID directly from the URL
-      const rawId = id;
-      console.log(`Raw proposal ID: ${rawId}`);
-
-      // Create minimal contract interface - only the needed function
-      const minimalABI = [
-        {
-          "inputs": [
-            { "internalType": "address[]", "name": "targets", "type": "address[]" },
-            { "internalType": "uint256[]", "name": "values", "type": "uint256[]" },
-            { "internalType": "bytes[]", "name": "calldatas", "type": "bytes[]" },
-            { "internalType": "bytes32", "name": "descriptionHash", "type": "bytes32" }
-          ],
-          "name": "execute",
-          "outputs": [ { "internalType": "uint256", "name": "", "type": "uint256" } ],
-          "stateMutability": "nonpayable",
-          "type": "function"
-        }
-      ];
-
-      // Get the raw parameters directly from the proposalData
-      const rawTargets = proposalData.targets;
-      const rawValues = proposalData.values.map(v => ethers.BigNumber.from(v));
-      const rawCalldatas = proposalData.calldatas;
-
-      // Get description hash - try multiple options if needed
-      let descriptionHash;
-
-      if (proposalData.full_description) {
-        // Option 1: Full description
-        descriptionHash = ethers.utils.id(proposalData.full_description);
-      } else {
-        // Option 2: Title + Description
-        descriptionHash = ethers.utils.id(`${proposalData.title}\n\n${proposalData.description}`);
-      }
-
-      console.log("BARE BONES parameters:");
-      console.log("- targets:", rawTargets);
-      console.log("- values:", rawValues.map(v => v.toString()));
-      console.log("- calldatas:", rawCalldatas.map(c => `${c.slice(0, 10)}...${c.slice(-8)}`));
-      console.log("- descriptionHash:", descriptionHash);
-
-      // Connect with minimal code
-      const provider = new ethers.providers.Web3Provider(window.ethereum);
-      await provider.send("eth_requestAccounts", []);
-      const signer = provider.getSigner();
-      const contract = new ethers.Contract(governorAddress, minimalABI, signer);
-
-      // Call the function directly
-      const tx = await contract.execute(
-        rawTargets,
-        rawValues,
-        rawCalldatas,
-        descriptionHash,
-        {
-          gasLimit: 3000000,
-          gasPrice: ethers.utils.parseUnits('2', 'gwei')
-        }
-      );
-
-      console.log("BARE BONES transaction submitted:", tx.hash);
-      setQueueExecuteError(`Transaction submitted: ${tx.hash}`);
-
-      toast({
-        title: "Transaction Submitted",
-        description: `TX: ${tx.hash.slice(0, 10)}...${tx.hash.slice(-6)}`,
-      });
-
-    } catch (err) {
-      console.error("BARE BONES execution error:", err);
-      setQueueExecuteError(`Bare bones error: ${err.message || String(err)}`);
-      toast({
-        title: "Execution Failed",
-        description: err.message || "Unknown error",
-        variant: "destructive"
+        title: 'Transaction failed',
+        description: /user rejected|denied/i.test(msg) ? 'You rejected the transaction.' : msg,
+        variant: 'destructive',
       });
     }
-  };
-
-  // Load vote history from database
-  useEffect(() => {
-    if (id) {
-      const loadVoteHistory = async () => {
-        console.log('Starting to load vote history for proposal:', id);
-        setIsLoadingVotes(true);
-        try {
-          const votes = await proposalQueries.getProposalVotes(id);
-          console.log('Loaded vote history:', votes);
-          setVoteHistory(votes || []);
-        } catch (err) {
-          console.error('Error loading vote history:', err);
-        } finally {
-          setIsLoadingVotes(false);
-          console.log('Finished loading vote history');
-        }
-      };
-
-      loadVoteHistory();
-    }
-  }, [id, txHash, refetchKey]);
-
-  // Update the receipt handler to save vote to database
-  useEffect(() => {
-    if (receipt && txHash) {
-      console.log('Vote transaction receipt received:', receipt);
-      console.log('Current votes data:', votes);
-
-      // Determine the support value from voteDirection since votes.data might not be available
-      const supportValue = voteDirection === 'for' ? 1 : voteDirection === 'against' ? 0 : 2;
-      const votingWeight = userVotingPower; // Use the user's voting power that we already have
-
-      // Save the vote to the database
-      const saveVote = async () => {
-        try {
-          console.log('Saving vote to database with:', {
-            proposal_id: id,
-            voter_address: address?.toLowerCase(),
-            support: supportValue,
-            voting_power: votingWeight,
-            tx_hash: txHash,
-            reason: voteReason
-          });
-
-          const voteData = {
-            proposal_id: id as string,
-            voter_address: address?.toLowerCase() as string,
-            support: supportValue as 0 | 1 | 2,
-            voting_power: votingWeight,
-            transaction_hash: txHash as string,
-            block_number: Number(receipt.blockNumber),
-            network_id: chainId,
-            reason: voteReason.trim() || undefined
-          };
-
-          // First, save the individual vote record
-          await proposalQueries.recordVote(voteData);
-          console.log('Vote recorded in votes_history table');
-
-          // Then, update the main proposal vote counts
-          try {
-            // Get current proposal vote counts
-            const { data: proposal } = await supabase
-              .from('proposals')
-              .select('votes_for, votes_against, votes_abstain')
-              .eq('proposal_id', id)
-              .single();
-
-            if (proposal) {
-              // Update the appropriate vote count based on vote direction
-              const updates = {
-                votes_for: supportValue === 1
-                  ? (proposal.votes_for || 0) + votingWeight
-                  : proposal.votes_for || 0,
-                votes_against: supportValue === 0
-                  ? (proposal.votes_against || 0) + votingWeight
-                  : proposal.votes_against || 0,
-                votes_abstain: supportValue === 2
-                  ? (proposal.votes_abstain || 0) + votingWeight
-                  : proposal.votes_abstain || 0
-              };
-
-              // Update the proposal record
-              await supabase
-                .from('proposals')
-                .update(updates)
-                .eq('proposal_id', id);
-
-              console.log('Updated proposal vote counts in proposals table:', updates);
-            }
-          } catch (updateErr) {
-            console.error('Error updating main proposal vote counts:', updateErr);
-          }
-
-          // Set the user's vote locally
-          setUserVote(voteDirection);
-
-          // Refresh vote history
-          setRefetchKey(prev => prev + 1);
-        } catch (err) {
-          console.error('Error saving vote to database:', err);
-        }
-      };
-
-      saveVote();
-    }
-  }, [receipt, txHash, address, id, chainId, voteReason, voteDirection, userVotingPower]);
+  }, [writeError]);
 
   // Helper function to format addresses for display
   const formatAddress = (address: string) => {
@@ -1882,9 +1302,9 @@ const ProposalDetail = ({
       case 1:
         return { text: 'FOR', color: 'text-green-600' };
       case 2:
-        return { text: 'ABSTAIN', color: 'text-gray-600' };
+        return { text: 'ABSTAIN', color: 'text-muted-foreground' };
       default:
-        return { text: 'UNKNOWN', color: 'text-gray-600' };
+        return { text: 'UNKNOWN', color: 'text-muted-foreground' };
     }
   };
 
@@ -1921,57 +1341,9 @@ const ProposalDetail = ({
     }
   }, [id, refetchKey]); // Add refetchKey to refresh after voting
 
-  // Add useEffect to fetch vote totals from votes_history
-  useEffect(() => {
-    if (id) {
-      const fetchAndUpdateVoteTotals = async () => {
-        try {
-          // First get all votes from votes_history
-          const { data: votes, error: votesError } = await supabase
-            .from('votes_history')
-            .select('*')
-            .eq('proposal_id', id);
-
-          if (votesError) {
-            console.error('Error fetching votes history:', votesError);
-            return;
-          }
-
-          console.log('Raw votes from history:', votes);
-
-          // Calculate totals from votes_history
-          const totals = votes?.reduce((acc, vote) => {
-            if (vote.support === 1) acc.votes_for += vote.voting_power;
-            else if (vote.support === 0) acc.votes_against += vote.voting_power;
-            else if (vote.support === 2) acc.votes_abstain += vote.voting_power;
-            return acc;
-          }, { votes_for: 0, votes_against: 0, votes_abstain: 0 });
-
-          console.log('Calculated totals from votes_history:', totals);
-
-          if (totals) {
-            // Update the proposals table with the correct totals
-            const { error: updateError } = await supabase
-              .from('proposals')
-              .update(totals)
-              .eq('proposal_id', id);
-
-            if (updateError) {
-              console.error('Error updating proposal totals:', updateError);
-              return;
-            }
-
-            // Update local state
-            setDbVoteTotals(totals);
-          }
-        } catch (err) {
-          console.error('Failed to fetch and update vote totals:', err);
-        }
-      };
-
-      fetchAndUpdateVoteTotals();
-    }
-  }, [id]); // Only run when id changes
+  // (Removed) the old effect that recomputed proposals.votes_* by summing
+  // votes_history and wrote it back — it zeroed totals when history was empty and
+  // re-injected ghost rows. Vote totals now come from on-chain proposalVotes().
 
   // Helper function to display vote type
   const displayVoteType = (vote: "for" | "against" | "abstain" | null) => {
@@ -1984,11 +1356,11 @@ const ProposalDetail = ({
   if (!proposalData) return <div>Proposal not found</div>;
 
   return (
-    <div className="w-full max-w-4xl mx-auto bg-white p-6 rounded-lg shadow-sm">
+    <div className="w-full max-w-4xl mx-auto bg-card p-6 rounded-lg shadow-sm">
       {/* Back button */}
       <Link
         to="/proposals"
-        className="inline-flex items-center text-sm text-gray-600 hover:text-gray-900 mb-6"
+        className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground mb-6"
       >
         <ArrowLeft className="h-4 w-4 mr-1" />
         Back to Proposals
@@ -1997,15 +1369,15 @@ const ProposalDetail = ({
       {/* Proposal header */}
       <div className="mb-6">
         <div className="flex justify-between items-start">
-          <h1 className="text-2xl font-bold text-gray-900">{proposalData?.title}</h1>
+          <h1 className="text-2xl font-bold text-foreground">{proposalData?.title}</h1>
           <div className="flex flex-col items-end gap-2">
             <span
               className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor()}`}
             >
-              {getProposalState(state || proposalData?.state || 0)}
+              {getProposalState(state !== undefined ? Number(state) : (proposalData?.state ?? 0))}
             </span>
             {Number(state) === 0 && snapshot && currentBlock && (
-              <div className="text-xs text-gray-600">
+              <div className="text-xs text-muted-foreground">
                 <CountdownTimer
                   targetBlock={Number(snapshot)}
                   currentBlock={Number(currentBlock)}
@@ -2014,7 +1386,7 @@ const ProposalDetail = ({
               </div>
             )}
             {Number(state) === 1 && deadline && currentBlock && (
-              <div className="text-xs text-gray-600">
+              <div className="text-xs text-muted-foreground">
                 <CountdownTimer
                   targetBlock={Number(deadline)}
                   currentBlock={Number(currentBlock)}
@@ -2024,16 +1396,144 @@ const ProposalDetail = ({
             )}
           </div>
         </div>
-        <p className="text-gray-600 mt-2">{proposalData?.description}</p>
+        <p className="text-muted-foreground mt-2">{proposalData?.description}</p>
       </div>
+
+      {/* Lifecycle / next-step panel: surfaces queue/execute actions after a vote */}
+      {state !== undefined && ![0, 1].includes(Number(state)) && (() => {
+        // Authorized exception: these early test proposals are shown as Passed
+        // regardless of on-chain state (see specialProposalIds).
+        if (specialProposalIds.includes(id || '')) {
+          return (
+            <Card className="mb-6 border-l-4 border-l-green-500">
+              <CardContent className="pt-6">
+                <div className="flex items-start gap-3">
+                  <CheckCircle2 className="h-5 w-5 text-green-600" />
+                  <div className="flex-1">
+                    <h3 className="text-lg font-medium">Passed</h3>
+                    <p className="text-sm text-muted-foreground mt-1">This proposal passed.</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        }
+        const etaSeconds = proposalEta ? Number(proposalEta) : undefined;
+        const step = getProposalLifecycleStep({
+          state: Number(state),
+          proposalEta: etaSeconds,
+          nowSeconds: Date.now() / 1000,
+        });
+
+        const accentByPhase: Record<string, string> = {
+          succeeded: 'border-l-amber-500',
+          'queued-waiting': 'border-l-blue-500',
+          'queued-ready': 'border-l-purple-500',
+          executed: 'border-l-green-500',
+          defeated: 'border-l-red-500',
+          canceled: 'border-l-gray-400',
+          expired: 'border-l-gray-400',
+          unknown: 'border-l-gray-400',
+        };
+
+        const renderIcon = () => {
+          switch (step.phase) {
+            case 'executed':
+              return <CheckCircle2 className="h-5 w-5 text-green-600" />;
+            case 'queued-waiting':
+              return <Clock className="h-5 w-5 text-amber-400" />;
+            case 'defeated':
+            case 'canceled':
+            case 'expired':
+              return <XCircle className="h-5 w-5 text-muted-foreground" />;
+            default:
+              return <AlertCircle className="h-5 w-5 text-amber-600" />;
+          }
+        };
+
+        // Don't prompt Execute until the timelock eta has loaded.
+        const etaPending = Number(state) === 5 && etaSeconds === undefined;
+        const showCta = step.actionRequired && !etaPending;
+
+        return (
+          <Card className={`mb-6 border-l-4 ${accentByPhase[step.phase] || 'border-l-gray-400'}`}>
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-3">
+                {renderIcon()}
+                <div className="flex-1">
+                  <h3 className="text-lg font-medium">{step.title}</h3>
+                  <p className="text-sm text-muted-foreground mt-1">{step.description}</p>
+
+                  {step.phase === 'queued-waiting' && etaSeconds !== undefined && (
+                    <div className="mt-3">
+                      <CountdownTimer
+                        targetTimestamp={etaSeconds}
+                        currentBlock={Number(currentBlock)}
+                        label="Execution available in:"
+                        type="detail"
+                      />
+                    </div>
+                  )}
+
+                  {etaPending && (
+                    <p className="text-sm text-muted-foreground mt-3 flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Checking timelock status…
+                    </p>
+                  )}
+
+                  {showCta && (
+                    <div className="mt-4">
+                      {!isConnected ? (
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span className="text-sm text-muted-foreground">
+                            Connect your wallet to {step.cta} this proposal:
+                          </span>
+                          <WalletButton />
+                        </div>
+                      ) : step.cta === 'queue' ? (
+                        <Button
+                          onClick={handleQueue}
+                          disabled={isQueueing || isConfirming}
+                          className="bg-primary hover:bg-primary/90 text-white"
+                        >
+                          {isQueueing ? (
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Confirm in wallet…</>
+                          ) : isConfirming ? (
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Queueing on-chain…</>
+                          ) : 'Queue proposal'}
+                        </Button>
+                      ) : step.cta === 'execute' ? (
+                        <Button
+                          onClick={handleExecute}
+                          disabled={isExecuting || isConfirming}
+                          className="bg-purple-600 hover:bg-purple-700 text-white"
+                        >
+                          {isExecuting ? (
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Confirm in wallet…</>
+                          ) : isConfirming ? (
+                            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Executing on-chain…</>
+                          ) : 'Execute proposal'}
+                        </Button>
+                      ) : null}
+                      {queueExecuteError && (
+                        <p className="text-sm text-red-600 mt-2">{queueExecuteError}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* Proposal metadata */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-        <div className="flex items-center text-sm text-gray-600">
+        <div className="flex items-center text-sm text-muted-foreground">
           <Calendar className="h-4 w-4 mr-2" />
           <span>Proposed: {formatDate(proposalData?.created_at || "")}</span>
         </div>
-        <div className="flex items-center text-sm text-gray-600">
+        <div className="flex items-center text-sm text-muted-foreground">
           <Calendar className="h-4 w-4 mr-2" />
           <span>Voting Ends: {deadline ? `~${formatDate(Number(deadline))}` : 'Not set'}</span>
         </div>
@@ -2046,7 +1546,7 @@ const ProposalDetail = ({
             <div className="flex justify-between items-center">
               <h3 className="text-lg font-medium">Voting Progress</h3>
               <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor()}`}>
-                {getProposalState(state || proposalData?.state || 0)}
+                {getProposalState(state !== undefined ? Number(state) : (proposalData?.state ?? 0))}
               </span>
             </div>
             <div>
@@ -2067,7 +1567,7 @@ const ProposalDetail = ({
               <Progress value={forPercentage} className="h-2" />
             </div>
 
-            <div className="flex justify-between text-sm text-gray-600">
+            <div className="flex justify-between text-sm text-muted-foreground">
               <div className="flex items-center gap-1">
                 <Users className="h-4 w-4" />
                 <span>{formatVoteNumber(totalVotes)} total votes</span>
@@ -2079,24 +1579,56 @@ const ProposalDetail = ({
               )}
             </div>
 
+            {/* Quorum status (on-chain). A proposal can have majority support and
+                still fail if quorum isn't met. */}
+            {quorumRequired !== null && (() => {
+              const isSpecial = specialProposalIds.includes(id || '');
+              const met = isSpecial || quorumMet;
+              return (
+                <div className="rounded-md border p-3 bg-secondary">
+                  <div className="flex justify-between items-center text-sm mb-1">
+                    <span className="font-medium">Quorum</span>
+                    <span className={met ? 'text-green-700 font-medium' : 'text-amber-700 font-medium'}>
+                      {met ? '✓ Quorum reached' : 'Not yet reached'}
+                    </span>
+                  </div>
+                  {!isSpecial && (
+                    <>
+                      <Progress value={quorumProgress} className="h-2" />
+                      <div className="flex justify-between text-xs text-muted-foreground mt-1">
+                        <span>
+                          {formatVoteNumber(Math.round(quorumCurrent))} of{' '}
+                          {formatVoteNumber(Math.round(quorumRequired))} votes needed
+                        </span>
+                        <span>{quorumProgress.toFixed(1)}%</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        On-chain For + Abstain votes count toward quorum.
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Voting buttons */}
             {canVote() ? (
               <div className="pt-4">
                 {isConnected ? (
                   userVote ? (
-                    <div className="bg-gray-50 p-4 rounded-md">
-                      <p className="text-sm text-gray-600">
+                    <div className="bg-secondary p-4 rounded-md">
+                      <p className="text-sm text-muted-foreground">
                         You voted {displayVoteType(userVote)} this proposal with {formatVoteNumber(userVotingPower)} voting power.
                       </p>
                     </div>
                   ) : isSubmitting ? (
-                    <div className="bg-gray-50 p-4 rounded-md">
-                      <p className="text-sm text-gray-600">
+                    <div className="bg-secondary p-4 rounded-md">
+                      <p className="text-sm text-muted-foreground">
                         {voteStatus || "Processing vote..."}
                       </p>
                       {/* Show transaction status if available */}
                       {queueExecuteHash && (
-                        <p className="text-xs text-blue-600 mt-2">
+                        <p className="text-xs text-amber-400 mt-2">
                           Transaction: {queueExecuteHash.slice(0, 10)}...{queueExecuteHash.slice(-8)}
                         </p>
                       )}
@@ -2127,8 +1659,8 @@ const ProposalDetail = ({
                       </Button>
                     </div>
                   ) : (
-                    <div className="bg-gray-50 p-4 rounded-md">
-                      <p className="text-sm text-gray-600 mb-4">
+                    <div className="bg-secondary p-4 rounded-md">
+                      <p className="text-sm text-muted-foreground mb-4">
                         You need to delegate your voting power before you can vote.
                         {delegateError && (
                           <span className="text-red-600 block mt-2">{delegateError}</span>
@@ -2144,34 +1676,40 @@ const ProposalDetail = ({
                     </div>
                   )
                 ) : (
-                  <div className="bg-gray-50 p-4 rounded-md text-center">
-                    <p className="text-sm text-gray-600 mb-2">
+                  <div className="bg-secondary p-4 rounded-md text-center">
+                    <p className="text-sm text-muted-foreground mb-2">
                       Connect your wallet to vote on this proposal
                     </p>
-                    <ConnectButton />
+                    <WalletButton />
                   </div>
                 )}
               </div>
             ) : (
               <div className="pt-4">
-                <div className="bg-gray-50 p-4 rounded-md">
-                  <p className="text-sm text-gray-600">
-                    {userVote ?
+                <div className="bg-secondary p-4 rounded-md">
+                  <p className="text-sm text-muted-foreground">
+                    {isWrongNetwork ?
+                      `This proposal is on KalyChain ${proposalChainId === 3889 ? 'Testnet' : 'Mainnet'}. Switch your wallet to that network to vote.` :
+                      userVote ?
                       `You voted ${displayVoteType(userVote)} on this proposal with ${formatVoteNumber(userVotingPower)} voting power.` :
-                      userVotingPower <= 0 ?
-                        'You need governance tokens to vote on this proposal.' :
-                        Number(state) === 0 ?
-                          'You can vote on this proposal.' :
-                          'This proposal has ended.'
+                      onChainHasVoted ?
+                        'You have already voted on this proposal.' :
+                        userVotingPower <= 0 ?
+                          'You need governance tokens to vote on this proposal.' :
+                          Number(state) === 0 ?
+                            'Voting has not started yet.' :
+                            Number(state) === 1 ?
+                              'You can vote on this proposal.' :
+                              'This proposal has ended.'
                     }
                   </p>
                   {Number(state) === 0 && snapshot && currentBlock && (
                     <div className="mt-4 space-y-2">
-                      <div className="flex justify-between text-sm text-gray-500">
+                      <div className="flex justify-between text-sm text-muted-foreground">
                         <span>Current block:</span>
                         <span>{Number(currentBlock)}</span>
                       </div>
-                      <div className="flex justify-between text-sm text-gray-500">
+                      <div className="flex justify-between text-sm text-muted-foreground">
                         <span>Voting starts at block:</span>
                         <span>{Number(snapshot)}</span>
                       </div>
@@ -2183,17 +1721,18 @@ const ProposalDetail = ({
                   )}
                   {Number(state) === 1 && deadline && currentBlock && (
                     <div className="mt-4 space-y-2">
-                      <div className="flex justify-between text-sm text-gray-500">
+                      <div className="flex justify-between text-sm text-muted-foreground">
                         <span>Current block:</span>
                         <span>{Number(currentBlock)}</span>
                       </div>
-                      <div className="flex justify-between text-sm text-gray-500">
+                      <div className="flex justify-between text-sm text-muted-foreground">
                         <span>Voting ends at block:</span>
                         <span>{Number(deadline)}</span>
                       </div>
                       <CountdownTimer
                         targetBlock={Number(deadline)}
                         currentBlock={Number(currentBlock)}
+                        label="Voting ends in:"
                       />
                     </div>
                   )}
@@ -2212,7 +1751,7 @@ const ProposalDetail = ({
           <TabsTrigger value="discussion">Discussion</TabsTrigger>
         </TabsList>
         <TabsContent value="details" className="mt-6">
-          <div className="prose max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-a:text-blue-600 hover:prose-a:underline prose-img:rounded-md">
+          <div className="prose prose-invert max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-a:text-amber-400 hover:prose-a:underline prose-img:rounded-md">
             {proposalData?.full_description ? (
               <ReactMarkdown
                 rehypePlugins={[rehypeRaw]}
@@ -2235,7 +1774,7 @@ const ProposalDetail = ({
               voteHistory.map((vote) => {
                 const voteType = getVoteTypeInfo(vote.support);
                 return (
-                  <div key={vote.id} className="bg-gray-50 p-4 rounded-md">
+                  <div key={vote.id} className="bg-secondary p-4 rounded-md">
                     <div className="flex justify-between items-center">
                       <div>
                         <span className="font-medium">{formatAddress(vote.voter_address)}</span>
@@ -2248,19 +1787,19 @@ const ProposalDetail = ({
                       </span>
                     </div>
                     {vote.reason && (
-                      <p className="text-sm text-gray-700 mt-2">
+                      <p className="text-sm text-gray-300 mt-2">
                         "{vote.reason}"
                       </p>
                     )}
                     <div className="flex justify-between mt-2">
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-muted-foreground">
                         {new Date(vote.timestamp).toLocaleString()}
                       </span>
                       <a
                         href={`${currentChain.blockExplorers?.default.url}/tx/${vote.transaction_hash}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs text-blue-600 hover:underline"
+                        className="text-xs text-amber-400 hover:underline"
                       >
                         View Transaction
                       </a>
@@ -2270,7 +1809,7 @@ const ProposalDetail = ({
               })
             ) : (
               <div className="text-center py-8">
-                <p className="text-gray-500">No votes have been cast for this proposal yet.</p>
+                <p className="text-muted-foreground">No votes have been cast for this proposal yet.</p>
               </div>
             )}
           </div>
@@ -2316,48 +1855,11 @@ const ProposalDetail = ({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Add Queue/Execute buttons */}
-      {isConnected && Number(state) === 4 && ( // Succeeded state
-        <div className="pt-4">
-          <Button
-            onClick={handleQueue}
-            disabled={isQueueing}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white"
-          >
-            {isQueueing ? 'Queueing...' : 'Queue Proposal'}
-          </Button>
-        </div>
-      )}
-      {isConnected && Number(state) === 5 && proposalEta && minDelay && (
-         <div className="pt-4 space-y-2">
-           <p className="text-sm text-gray-600">
-             Proposal is queued. Execution available after timelock.
-           </p>
-           <CountdownTimer
-             targetTimestamp={Number(proposalEta)}
-             currentBlock={Number(currentBlock)}
-             label="Execution available in:"
-             type="detail"
-           />
-           {Date.now() / 1000 >= Number(proposalEta) ? (
-              <Button
-                onClick={handleExecute}
-                disabled={isExecuting}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white"
-              >
-                {isExecuting ? 'Executing...' : 'Execute Proposal'}
-              </Button>
-           ) : (
-             <Button disabled className="w-full">Execute Proposal (Waiting for Timelock)</Button>
-           )}
-
-           {/* Remove all debug UI elements */}
-         </div>
-       )}
+      {/* Queue/Execute actions are surfaced by the lifecycle panel near the top. */}
 
       {/* Display View Count */}
       {proposalData?.views_count !== undefined && (
-        <div className="text-sm text-gray-500 mt-2 text-right">
+        <div className="text-sm text-muted-foreground mt-2 text-right">
           Views: {proposalData.views_count}
         </div>
       )}

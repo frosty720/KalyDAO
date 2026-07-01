@@ -37,26 +37,6 @@ export function useDao() {
     };
   }, [chainId]);
 
-  const createProposal = useCallback(async (
-    targets: `0x${string}`[],
-    values: bigint[],
-    calldatas: `0x${string}`[],
-    description: string,
-    writeContractFn: any
-  ) => {
-    if (!writeContractFn || !address) throw new Error('Write function or address not available');
-    
-    const gasConfig = getTransactionGasConfig();
-    
-    return writeContractFn({
-      address: contracts.governor.address as `0x${string}`,
-      abi: contracts.governor.abi,
-      functionName: 'propose',
-      args: [targets, values, calldatas, description],
-      ...gasConfig
-    });
-  }, [contracts.governor, address]);
-
   const vote = useCallback(async (
     proposalId: bigint,
     support: number, // 0 = Against, 1 = For, 2 = Abstain
@@ -102,7 +82,6 @@ export function useDao() {
 
   return {
     contracts,
-    createProposal,
     vote,
     delegate
   };

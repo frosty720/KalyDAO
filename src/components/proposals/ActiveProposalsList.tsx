@@ -19,7 +19,9 @@ import {
 } from "@/components/ui/select";
 import { supabase } from "@/lib/supabase";
 import { useToast } from "@/components/ui/use-toast";
-import { useChainId } from "wagmi";
+import { useChainId, useAccount, useBlockNumber } from "wagmi";
+import { isSpecialProposal } from "@/lib/proposalVotes";
+import { getDaoSubgraphUrl, queryProposalTotals } from "@/lib/daoSubgraph";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
 
@@ -33,6 +35,7 @@ interface Proposal {
   votesAbstain: number;
   totalVotes: number;
   timeRemaining?: string;
+  deadlineBlock: number;
   status: "active" | "passed" | "failed" | "pending" | "queued" | "executed";
   createdAt: string;
   category?: string;
@@ -44,24 +47,23 @@ interface ActiveProposalsListProps {
   limit?: number;
 }
 
-// Helper function to calculate time remaining
-const calculateTimeRemaining = (deadlineTimestamp: number): string => {
-  if (!deadlineTimestamp) return "Unknown";
-  
-  const now = Math.floor(Date.now() / 1000);
-  const remainingSeconds = deadlineTimestamp - now;
-  
-  if (remainingSeconds <= 0) return "Ended";
-  
+// Time remaining from BLOCK NUMBERS. `deadline_timestamp` in Supabase is actually
+// the proposal's deadline BLOCK (from proposalDeadline()), not a unix timestamp — so
+// we compare it to the current block, not Date.now(). (~2s KalyChain blocks.)
+const calculateTimeRemaining = (deadlineBlock: number, currentBlock: number): string => {
+  if (!deadlineBlock || !currentBlock) return "";
+  const blocksRemaining = deadlineBlock - currentBlock;
+  if (blocksRemaining <= 0) return "Ended";
+
+  const remainingSeconds = blocksRemaining * 2;
   const days = Math.floor(remainingSeconds / 86400);
   const hours = Math.floor((remainingSeconds % 86400) / 3600);
-  
+
   if (days > 0) {
-    return `${days} day${days > 1 ? 's' : ''} ${hours} hour${hours > 1 ? 's' : ''}`;
-  } else {
-    const minutes = Math.floor((remainingSeconds % 3600) / 60);
-    return `${hours} hour${hours > 1 ? 's' : ''} ${minutes} minute${minutes > 1 ? 's' : ''}`;
+    return `${days} day${days > 1 ? 's' : ''} ${hours} hour${hours > 1 ? 's' : ''} left`;
   }
+  const minutes = Math.floor((remainingSeconds % 3600) / 60);
+  return `${hours} hour${hours > 1 ? 's' : ''} ${minutes} minute${minutes > 1 ? 's' : ''} left`;
 };
 
 // Map database status to UI status
@@ -101,14 +103,22 @@ const ActiveProposalsList = ({
   const [error, setError] = useState<string | null>(null);
   const [showingRecentProposals, setShowingRecentProposals] = useState<boolean>(false);
   const { toast } = useToast();
-  const chainId = useChainId();
+  const walletChainId = useChainId();
+  const { isConnected } = useAccount();
+  // When no wallet is connected, default to mainnet (3888) instead of whatever the
+  // wagmi config last persisted (which could be testnet).
+  const chainId = isConnected ? walletChainId : 3888;
+  // Current block on the active chain — used to turn deadline BLOCK numbers into
+  // real "time remaining" (deadline_timestamp is a block number, not unix time).
+  const { data: currentBlockData } = useBlockNumber({ chainId, watch: true });
+  const currentBlock = Number(currentBlockData || 0);
 
   // Fetch proposals from Supabase
   useEffect(() => {
     const fetchProposals = async () => {
       setIsLoading(true);
       setError(null);
-      
+
       try {
         console.log('Fetching proposals for chain ID:', chainId);
         const { data, error } = await supabase
@@ -129,25 +139,48 @@ const ActiveProposalsList = ({
         }
         
         console.log('Fetched proposals:', data);
-        
+
+        // Overlay accurate vote totals from the DAO subgraph (on-chain truth). Supabase
+        // no longer counts votes. Only mainnet has a subgraph; testnet keeps Supabase.
+        // Special P1/P2 keep their injected display values (never overlaid).
+        const subUrl = getDaoSubgraphUrl(chainId);
+        const totalsMap = new Map<string, { for: number; against: number; abstain: number }>();
+        if (subUrl) {
+          const totals = await queryProposalTotals(subUrl);
+          for (const t of totals) {
+            totalsMap.set(t.proposalId, {
+              for: Number(t.forVotes) / 1e18,
+              against: Number(t.againstVotes) / 1e18,
+              abstain: Number(t.abstainVotes) / 1e18,
+            });
+          }
+        }
+
         // Transform Supabase data to our component format
         const transformedProposals: Proposal[] = data.map(item => {
-          const totalVotes = (item.votes_for || 0) + (item.votes_against || 0) + (item.votes_abstain || 0);
-          
+          const sg = isSpecialProposal(item.proposal_id) ? undefined : totalsMap.get(item.proposal_id);
+          const votesFor = sg ? sg.for : (item.votes_for || 0);
+          const votesAgainst = sg ? sg.against : (item.votes_against || 0);
+          const votesAbstain = sg ? sg.abstain : (item.votes_abstain || 0);
+          const totalVotes = votesFor + votesAgainst + votesAbstain;
+
           // Calculate time remaining if we have a deadline
-          const timeRemaining = calculateTimeRemaining(item.deadline_timestamp);
-          
+          // Store the deadline BLOCK; compute the human string at render (below) so
+          // it stays correct as blocks advance without re-querying Supabase.
+          const deadlineBlock = Number(item.deadline_timestamp) || 0;
+
           return {
             id: item.proposal_id,
             title: item.title,
             description: item.description,
             summary: item.summary,
-            votesFor: item.votes_for || 0,
-            votesAgainst: item.votes_against || 0,
-            votesAbstain: item.votes_abstain || 0,
+            votesFor,
+            votesAgainst,
+            votesAbstain,
             totalVotes,
-            timeRemaining,
-            status: mapStateToStatus(item.state),
+            deadlineBlock,
+            // Legacy proposals #1/#2 always display as Passed (see proposalVotes.ts).
+            status: isSpecialProposal(item.proposal_id) ? 'passed' : mapStateToStatus(item.state),
             createdAt: item.created_at,
             category: item.category,
           };
@@ -173,6 +206,20 @@ const ActiveProposalsList = ({
     };
     
     fetchProposals();
+
+    // Realtime: re-fetch when proposals change so newly created/updated proposals
+    // appear without a manual page refresh.
+    const channel = supabase
+      .channel(`active-proposals-${chainId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'proposals', filter: `chain_id=eq.${chainId}` },
+        () => fetchProposals(),
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [chainId, toast]);
 
   // Filter proposals based on search term and status
@@ -182,11 +229,13 @@ const ActiveProposalsList = ({
       (proposal.description && proposal.description.toLowerCase().includes(searchTerm.toLowerCase())) ||
       (proposal.summary && proposal.summary.toLowerCase().includes(searchTerm.toLowerCase()));
     
-    // If we don't have active proposals, show recent ones of any status
-    const matchesStatus = showingRecentProposals 
-      ? true 
+    // Show ALL statuses when: no active proposals exist (recent fallback), OR this is
+    // the compact home embed (showFilters=false) — the home showcases the latest
+    // proposals regardless of status, so Passed ones (e.g. P1/P2) stay visible.
+    const matchesStatus = (showingRecentProposals || !showFilters)
+      ? true
       : statusFilter === "all" || proposal.status === statusFilter;
-    
+
     return matchesSearch && matchesStatus;
   });
 
@@ -205,14 +254,15 @@ const ActiveProposalsList = ({
   // Limit the number of proposals to display
   const displayProposals = sortedProposals.slice(0, limit);
 
-  // Adjust title if showing recent proposals instead of active ones
-  const displayTitle = showingRecentProposals ? "Recent Proposals" : title;
+  // "Recent Proposals" whenever we show mixed statuses (recent fallback or the home
+  // embed) — an "Active Proposals" heading over Passed cards would be misleading.
+  const displayTitle = (showingRecentProposals || !showFilters) ? "Recent Proposals" : title;
 
   return (
-    <div className="w-full max-w-7xl mx-auto bg-white p-6 rounded-lg shadow-sm">
+    <div className="w-full max-w-7xl mx-auto bg-card p-6 rounded-lg shadow-sm">
       <div className="flex flex-col space-y-6">
         <div className="flex justify-between items-center">
-          <h2 className="text-2xl font-bold text-gray-900">{displayTitle}</h2>
+          <h2 className="text-2xl font-bold text-foreground">{displayTitle}</h2>
           <Link to="/proposals">
             <Button variant="outline" className="hidden sm:flex">
               View All Proposals
@@ -223,7 +273,7 @@ const ActiveProposalsList = ({
         {showFilters && (
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="relative flex-grow">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input
                 placeholder="Search proposals..."
                 value={searchTerm}
@@ -284,7 +334,7 @@ const ActiveProposalsList = ({
         {isLoading ? (
           <div className="flex flex-col items-center justify-center py-12">
             <Loader2 className="h-12 w-12 text-primary animate-spin mb-4" />
-            <p className="text-gray-500">Loading proposals...</p>
+            <p className="text-muted-foreground">Loading proposals...</p>
           </div>
         ) : displayProposals.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -298,7 +348,7 @@ const ActiveProposalsList = ({
                 votesAgainst={proposal.votesAgainst}
                 votesAbstain={proposal.votesAbstain}
                 totalVotes={proposal.totalVotes}
-                timeRemaining={proposal.timeRemaining || ""}
+                timeRemaining={calculateTimeRemaining(proposal.deadlineBlock, currentBlock)}
                 status={proposal.status}
               />
             ))}
@@ -307,25 +357,25 @@ const ActiveProposalsList = ({
           <div className="flex flex-col items-center justify-center py-12 text-center">
             {showingRecentProposals ? (
               <>
-                <Clock className="h-12 w-12 text-gray-400 mb-4" />
-                <h3 className="text-lg font-medium text-gray-900">
+                <Clock className="h-12 w-12 text-muted-foreground mb-4" />
+                <h3 className="text-lg font-medium text-foreground">
                   No active proposals
                 </h3>
-                <p className="text-gray-500 mt-2">
+                <p className="text-muted-foreground mt-2">
                   There are no active proposals at this time. 
                   <br />
-                  <Link to="/proposals/create" className="text-primary hover:underline">
+                  <Link to="/create-proposal" className="text-primary hover:underline">
                     Create a new proposal
                   </Link>
                 </p>
               </>
             ) : (
               <>
-                <Filter className="h-12 w-12 text-gray-400 mb-4" />
-                <h3 className="text-lg font-medium text-gray-900">
+                <Filter className="h-12 w-12 text-muted-foreground mb-4" />
+                <h3 className="text-lg font-medium text-foreground">
                   No proposals found
                 </h3>
-                <p className="text-gray-500 mt-2">
+                <p className="text-muted-foreground mt-2">
                   {searchTerm || statusFilter !== 'active'
                     ? "Try adjusting your search or filters"
                     : "There are no proposals at this time"}

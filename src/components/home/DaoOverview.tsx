@@ -19,6 +19,8 @@ import {
 import { formatUnits, formatEther, parseEther } from "viem";
 import { CONTRACT_ADDRESSES_BY_NETWORK } from "@/blockchain/contracts/addresses";
 import { supabase } from "@/lib/supabase";
+import { useQuery } from "@tanstack/react-query";
+import { getDaoSubgraphUrl, queryGovernor } from "@/lib/daoSubgraph";
 import { useBlockWatcher } from "@/components/BlockWatcher";
 import {
   Tooltip,
@@ -135,8 +137,8 @@ const DaoOverview = ({
     totalSupply: 0,
     treasuryBalance: 0,
     proposalsCreated: 0,
-    quorumRequirement: 0,
-    quorumPercentage: 0,
+    quorumRequirement: null as number | null,
+    quorumPercentage: null as number | null,
   });
   const [isLoading, setIsLoading] = useState(true);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -164,36 +166,51 @@ const DaoOverview = ({
   // Function to fetch all data
   const fetchSupabaseProposals = useCallback(async () => {
     try {
+      // Filter by chain so the count matches the per-network proposal lists.
       const { count, error } = await supabase
         .from('proposals')
-        .select('*', { count: 'exact', head: true });
-        
+        .select('*', { count: 'exact', head: true })
+        .eq('chain_id', chainId);
+
       if (error) {
         console.error('Error fetching proposals count from Supabase:', error);
         return;
       }
-      
-      console.log(`Supabase proposals count: ${count}`);
+
       setSupabaseProposals(count || 0);
     } catch (err) {
       console.error('Unexpected error fetching proposals:', err);
     }
-  }, []);
+  }, [chainId]);
 
-  // Get quorum requirement - try different possible functions
+  // Quorum config from the DAO subgraph (chain truth) on mainnet — replaces the
+  // quorumNumerator / quorumVotes / quorum(block) RPC reads. Testnet has no subgraph,
+  // so the on-chain reads below stay enabled there.
+  const daoSubgraphUrl = getDaoSubgraphUrl(chainId);
+  const hasDaoSubgraph = !!daoSubgraphUrl;
+  const { data: sgGovernor } = useQuery({
+    queryKey: ['daoGovernor', chainId],
+    enabled: hasDaoSubgraph,
+    staleTime: 5 * 60_000,
+    queryFn: () => queryGovernor(daoSubgraphUrl as string),
+  });
+
+  // Get quorum requirement - try different possible functions (testnet fallback only)
   const { data: quorumVotes, isError: isQuorumVotesError } = useReadContract({
     address: governorAddress,
     abi: governorABI,
     functionName: 'quorumVotes',
     chainId,
+    query: { enabled: !hasDaoSubgraph },
   });
 
   // Try to get quorum as percentage (quorumNumerator in OpenZeppelin Governor)
-  const { data: quorumNumerator, isError: isQuorumNumeratorError } = useReadContract({
+  const { data: quorumNumeratorOnChain, isError: isQuorumNumeratorError } = useReadContract({
     address: governorAddress,
     abi: governorABI,
     functionName: 'quorumNumerator',
     chainId,
+    query: { enabled: !hasDaoSubgraph },
   });
 
   // If current block is available, try the quorum(blockNumber) function
@@ -203,7 +220,12 @@ const DaoOverview = ({
     functionName: 'quorum',
     args: blockNumber ? [blockNumber] : undefined,
     chainId,
+    query: { enabled: !hasDaoSubgraph && !!blockNumber },
   });
+
+  // Prefer the subgraph quorum fraction; fall back to the on-chain numerator on testnet.
+  const quorumNumerator = hasDaoSubgraph ? sgGovernor?.quorumNumerator : quorumNumeratorOnChain;
+  const quorumDenominator = hasDaoSubgraph ? sgGovernor?.quorumDenominator : undefined;
 
   // Standard wagmi hooks for other data
   const { data: totalSupply, isError: isTotalSupplyError } = useReadContract({
@@ -317,17 +339,16 @@ const DaoOverview = ({
     // Store the percentage for display
     let quorumPercentage = 0;
     
-    // If we have a quorum percentage and total supply, calculate actual quorum
+    // If we have a quorum fraction and total supply, calculate actual quorum.
+    // numerator/denominator come from the subgraph on mainnet (default 4/100).
     if (quorumNumerator && totalSupply) {
-      // OpenZeppelin uses a divisor of 100 for percentages
-      const divisor = 100n;
-      // quorumNumerator is the percentage value (e.g., 4 means 4%)
-      quorumPercentage = Number(quorumNumerator);
+      const divisor = quorumDenominator && quorumDenominator > 0n ? quorumDenominator : 100n;
+      quorumPercentage = (Number(quorumNumerator) * 100) / Number(divisor);
       console.log(`Quorum set to ${quorumPercentage}% of total supply`);
-      
-      // Calculate quorum as percentage of total supply
+
+      // quorum = totalSupply * numerator / denominator
       const calculatedQuorum = (BigInt(totalSupply) * BigInt(quorumNumerator)) / divisor;
-      return { 
+      return {
         amount: Number(formatUnits(calculatedQuorum, 18)),
         percentage: quorumPercentage
       };
@@ -358,22 +379,11 @@ const DaoOverview = ({
       };
     }
     
-    // Default quorum value if nothing works
-    console.log("Using default quorum value of 4% (estimated)");
-    quorumPercentage = 4; // Default percentage
-    if (totalSupply) {
-      // Estimate based on typical 4% quorum
-      const estimatedQuorum = (BigInt(totalSupply) * 4n) / 100n;
-      return { 
-        amount: Number(formatUnits(estimatedQuorum, 18)),
-        percentage: quorumPercentage
-      };
-    }
-    
-    return { 
-      amount: 4, // Default to 4 KLC if all calculations fail
-      percentage: quorumPercentage
-    };
+    // No on-chain quorum source resolved. Do NOT invent a number (the old code
+    // fabricated "4%", which could be flat wrong) — report it as unknown so the UI
+    // shows "—" instead of a fake value.
+    console.warn('Quorum unavailable: no on-chain quorum source resolved');
+    return { amount: null, percentage: null };
   };
 
   // Update statistics when data changes
@@ -397,20 +407,20 @@ const DaoOverview = ({
     });
     
     setIsLoading(false);
-  }, [blockNumber, lastUpdatedBlock, totalSupply, quorumVotes, quorumNumerator, quorumAtBlock, userTokenBalance, treasuryBalance, supabaseProposals]);
+  }, [blockNumber, lastUpdatedBlock, totalSupply, quorumVotes, quorumNumerator, quorumDenominator, quorumAtBlock, userTokenBalance, treasuryBalance, supabaseProposals]);
 
   return (
-    <Card className="w-full bg-white shadow-md">
+    <Card className="w-full shadow-md">
       <CardHeader>
-        <CardTitle className="text-2xl font-bold text-gray-900">
+        <CardTitle className="text-2xl font-bold text-foreground">
           {title}
         </CardTitle>
         <div className="mt-2">
-          <CardDescription className="text-gray-600">
+          <CardDescription className="text-muted-foreground">
             {description}
           </CardDescription>
           <div className="mt-3">
-            <p className="text-sm text-gray-700 mb-2">
+            <p className="text-sm text-gray-300 mb-2">
               <strong>Important:</strong> To participate in governance, you need to wrap your KLC tokens to gKLC at a 1:1 ratio. 
               Only gKLC tokens can be used for creating proposals and voting.
             </p>
@@ -443,16 +453,16 @@ const DaoOverview = ({
             icon="fileText"
             isLoading={isLoading}
           />
-          <div className="bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <div className="bg-secondary p-4 rounded-lg border border-border">
             <div className="flex items-center space-x-3">
               <div className="p-2 bg-primary/10 rounded-full">
                 <CheckCircle className="h-5 w-5 text-primary" />
               </div>
               <div className="flex-1">
                 <div className="flex items-center space-x-1">
-                  <p className="text-sm font-medium text-gray-500">Quorum Requirement</p>
+                  <p className="text-sm font-medium text-muted-foreground">Quorum Requirement</p>
                   <div className="group relative cursor-help">
-                    <HelpCircle className="h-4 w-4 text-gray-400" />
+                    <HelpCircle className="h-4 w-4 text-muted-foreground" />
                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-black text-white text-xs rounded p-2 w-64 z-10">
                       {QUORUM_TOOLTIP}
                       <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-black"></div>
@@ -462,8 +472,10 @@ const DaoOverview = ({
                 {isLoading ? (
                   <div className="h-7 w-24 bg-gray-200 animate-pulse rounded"></div>
                 ) : (
-                  <p className="text-xl font-bold text-gray-900">
-                    {`${statistics.quorumRequirement?.toLocaleString()} gKLC (${statistics.quorumPercentage}%)`}
+                  <p className="text-xl font-bold text-foreground">
+                    {statistics.quorumRequirement != null && statistics.quorumPercentage != null
+                      ? `${statistics.quorumRequirement.toLocaleString()} gKLC (${statistics.quorumPercentage}%)`
+                      : '—'}
                   </p>
                 )}
               </div>
@@ -474,7 +486,7 @@ const DaoOverview = ({
         <Separator className="my-6" />
 
         <div className="flex flex-col space-y-4">
-          <h3 className="text-lg font-semibold text-gray-800">
+          <h3 className="text-lg font-semibold text-foreground">
             Governance Process
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -532,20 +544,20 @@ const StatCard = ({ title, value, icon, isLoading = false, tooltip }: StatCardPr
   };
 
   return (
-    <div className="bg-gray-50 p-4 rounded-lg border border-gray-100">
+    <div className="stat-card p-4">
       <div className="flex items-center space-x-3">
         <div className="p-2 bg-primary/10 rounded-full">
           {getIcon()}
         </div>
         <div className="flex-1">
           <div className="flex items-center space-x-1">
-            <p className="text-sm font-medium text-gray-500">{title}</p>
+            <p className="text-sm font-medium text-muted-foreground">{title}</p>
             {tooltip && (
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <div className="cursor-help">
-                      <HelpCircle className="h-4 w-4 text-gray-400" />
+                      <HelpCircle className="h-4 w-4 text-muted-foreground" />
                     </div>
                   </TooltipTrigger>
                   <TooltipContent className="max-w-xs p-2">
@@ -556,9 +568,9 @@ const StatCard = ({ title, value, icon, isLoading = false, tooltip }: StatCardPr
             )}
           </div>
           {isLoading ? (
-            <div className="h-7 w-24 bg-gray-200 animate-pulse rounded"></div>
+            <div className="h-7 w-24 bg-secondary animate-pulse rounded"></div>
           ) : (
-            <p className="text-xl font-bold text-gray-900">{value}</p>
+            <p className="text-xl font-bold text-foreground figure-glow">{value}</p>
           )}
         </div>
       </div>
@@ -581,8 +593,8 @@ const ProcessStep = ({ number, title, description }: ProcessStepProps) => {
         </div>
       </div>
       <div>
-        <h4 className="font-medium text-gray-800">{title}</h4>
-        <p className="text-sm text-gray-600 mt-1">{description}</p>
+        <h4 className="font-medium text-foreground">{title}</h4>
+        <p className="text-sm text-muted-foreground mt-1">{description}</p>
       </div>
     </div>
   );

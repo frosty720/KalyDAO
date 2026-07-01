@@ -1,68 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 @tailwind base;
   @tailwind components;
   @tailwind utilities;
 
   @layer base {
+    /* kaly-vault palette: amber-on-black. Hex tokens converted to the shadcn HSL
+       triplet format the DAO uses. Single dark theme (matches kaly-vault). */
     :root {
-      --background: 0 0% 100%;
-      --foreground: 222.2 84% 4.9%;
+      --background: 0 0% 2%;            /* #050505 */
+      --foreground: 0 0% 100%;          /* #ffffff */
 
-      --card: 0 0% 100%;
-      --card-foreground: 222.2 84% 4.9%;
+      --card: 24 10% 10%;               /* #1c1917 warm near-black */
+      --card-foreground: 0 0% 100%;
 
-      --popover: 0 0% 100%;
-      --popover-foreground: 222.2 84% 4.9%;
+      --popover: 24 12% 8%;
+      --popover-foreground: 0 0% 100%;
 
-      --primary: 222.2 47.4% 11.2%;
-      --primary-foreground: 210 40% 98%;
+      --primary: 38 92% 50%;            /* amber-500 #f59e0b */
+      --primary-foreground: 20 14% 4%;  /* near-black text on amber */
 
-      --secondary: 210 40% 96.1%;
-      --secondary-foreground: 222.2 47.4% 11.2%;
+      --secondary: 24 10% 15%;
+      --secondary-foreground: 0 0% 98%;
 
-      --muted: 210 40% 96.1%;
-      --muted-foreground: 215.4 16.3% 46.9%;
+      --muted: 24 10% 15%;
+      --muted-foreground: 24 6% 64%;    /* #a8a29e warm gray */
 
-      --accent: 210 40% 96.1%;
-      --accent-foreground: 222.2 47.4% 11.2%;
+      --accent: 24 10% 18%;
+      --accent-foreground: 0 0% 98%;
 
-      --destructive: 0 84.2% 60.2%;
-      --destructive-foreground: 210 40% 98%;
+      --destructive: 0 84% 60%;         /* #ef4444 danger */
+      --destructive-foreground: 0 0% 100%;
 
-      --border: 214.3 31.8% 91.4%;
-      --input: 214.3 31.8% 91.4%;
-      --ring: 222.2 84% 4.9%;
+      --border: 36 25% 20%;             /* amber-tinted line */
+      --input: 36 20% 18%;
+      --ring: 38 92% 50%;               /* amber focus ring */
 
-      --radius: 0.5rem;
+      --radius: 0.75rem;                /* kaly-vault card radius */
     }
 
+    /* .dark mirrors :root — the app is single-theme (kaly-vault amber-on-black),
+       so both must be identical to avoid one overriding the other. */
     .dark {
-      --background: 222.2 84% 4.9%;
-      --foreground: 210 40% 98%;
+      --background: 0 0% 2%;
+      --foreground: 0 0% 100%;
 
-      --card: 222.2 84% 4.9%;
-      --card-foreground: 210 40% 98%;
+      --card: 24 10% 10%;
+      --card-foreground: 0 0% 100%;
 
-      --popover: 222.2 84% 4.9%;
-      --popover-foreground: 210 40% 98%;
+      --popover: 24 12% 8%;
+      --popover-foreground: 0 0% 100%;
 
-      --primary: 210 40% 98%;
-      --primary-foreground: 222.2 47.4% 11.2%;
+      --primary: 38 92% 50%;
+      --primary-foreground: 20 14% 4%;
 
-      --secondary: 217.2 32.6% 17.5%;
-      --secondary-foreground: 210 40% 98%;
+      --secondary: 24 10% 15%;
+      --secondary-foreground: 0 0% 98%;
 
-      --muted: 217.2 32.6% 17.5%;
-      --muted-foreground: 215 20.2% 65.1%;
+      --muted: 24 10% 15%;
+      --muted-foreground: 24 6% 64%;
 
-      --accent: 217.2 32.6% 17.5%;
-      --accent-foreground: 210 40% 98%;
+      --accent: 24 10% 18%;
+      --accent-foreground: 0 0% 98%;
 
-      --destructive: 0 62.8% 30.6%;
-      --destructive-foreground: 210 40% 98%;
+      --destructive: 0 84% 60%;
+      --destructive-foreground: 0 0% 100%;
 
-      --border: 217.2 32.6% 17.5%;
-      --input: 217.2 32.6% 17.5%;
-      --ring: 212.7 26.8% 83.9%;
+      --border: 36 25% 20%;
+      --input: 36 20% 18%;
+      --ring: 38 92% 50%;
     }
   }
 
@@ -71,6 +77,153 @@
       @apply border-border;
     }
     body {
-      @apply bg-background text-foreground;
+      @apply text-foreground;
+      /* kaly-vault body gradient */
+      background: radial-gradient(ellipse at 50% 0%, #1c1917 0%, #0a0a0a 40%, #050505 100%);
+      background-attachment: fixed;
+      min-height: 100vh;
+      font-family: 'Inter', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
     }
   }
+
+/* Static content pages (Voting Guide, legal, etc.). The app does not include the
+   Tailwind typography (`prose`) plugin, so block-level elements are styled here
+   explicitly — otherwise headings render at body size and lists lose their bullets. */
+.static-content {
+  color: #d1d5db; /* gray-300 (light text on dark) */
+  line-height: 1.65;
+}
+.static-content h2 {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  color: #f5f5f5; /* near-white */
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+}
+.static-content h2:first-child {
+  margin-top: 0;
+}
+.static-content p {
+  margin-bottom: 1rem;
+}
+.static-content ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+}
+.static-content li {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.static-content a {
+  color: #fbbf24; /* amber-400 */
+}
+.static-content a:hover {
+  text-decoration: underline;
+}
+.static-content strong {
+  font-weight: 600;
+  color: #f5f5f5;
+}
+.static-content em {
+  font-style: italic;
+}
+
+/* ===================================================================== */
+/* kaly-vault signature component classes (ported verbatim, hex-inlined) */
+/* ===================================================================== */
+.glass {
+  background: rgba(28, 25, 23, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  transition: border-color 200ms ease, transform 200ms ease, box-shadow 200ms ease;
+}
+.glass-hover:hover {
+  border-color: rgba(245, 158, 11, 0.5);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: #fff;
+  font-weight: 600;
+  border: none;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.3);
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+  box-shadow: 0 8px 22px rgba(245, 158, 11, 0.45);
+  transform: translateY(-1px);
+}
+
+.heading-underline {
+  position: relative;
+  display: inline-block;
+  padding-bottom: 0.4rem;
+}
+.heading-underline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 2.5rem;
+  height: 3px;
+  background: #f59e0b;
+  border-radius: 2px;
+}
+
+/* KPI / stat card — glass with an amber top edge that lights on hover. */
+.stat-card {
+  position: relative;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+  border: 1px solid rgba(245, 158, 11, 0.16);
+  border-radius: 1rem;
+  overflow: hidden;
+  transition: border-color 220ms ease, transform 220ms ease, box-shadow 220ms ease;
+}
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #f59e0b, transparent);
+  opacity: 0.5;
+  transition: opacity 220ms ease;
+}
+.stat-card:hover {
+  border-color: rgba(245, 158, 11, 0.45);
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(245, 158, 11, 0.12);
+}
+.stat-card:hover::before { opacity: 1; }
+
+/* Mono numerals that glow faintly — used for big headline figures. */
+.figure-glow {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 24px rgba(245, 158, 11, 0.35);
+}
+
+/* Fine grid texture / gradient-mesh atmosphere for hero surfaces. */
+.grid-texture {
+  background-image:
+    linear-gradient(rgba(245, 158, 11, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(245, 158, 11, 0.04) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+.mesh-hero {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(60% 90% at 12% 8%, rgba(245, 158, 11, 0.16), transparent 60%),
+    radial-gradient(50% 80% at 92% 18%, rgba(217, 119, 6, 0.14), transparent 55%),
+    radial-gradient(80% 120% at 50% 120%, rgba(180, 83, 9, 0.12), transparent 60%),
+    linear-gradient(160deg, rgba(28, 25, 23, 0.9), rgba(10, 10, 10, 0.92));
+}

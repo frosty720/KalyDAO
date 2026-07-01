@@ -1,10 +1,8 @@
-import { Chain } from '@rainbow-me/rainbowkit';
+import type { Chain } from 'viem';
 
 export const kalyChainMainnet = {
   id: 3888,
   name: 'KalyChain',
-  iconUrl: '/kalychain.png', 
-  iconBackground: '#fff',
   nativeCurrency: {
     name: 'KalyChain',
     symbol: 'KLC',
@@ -27,8 +25,6 @@ export const kalyChainMainnet = {
 export const kalyChainTestnet = {
   id: 3889, 
   name: 'KalyChain Testnet',
-  iconUrl: '/kalychain.png', 
-  iconBackground: '#fff',
   nativeCurrency: {
     name: 'KalyChain',
     symbol: 'KLC',

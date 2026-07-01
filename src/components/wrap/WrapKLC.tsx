@@ -1,12 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { useAccount, useBalance, useChainId, useWriteContract } from 'wagmi';
+import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  useAccount,
+  useBalance,
+  useChainId,
+  useReadContract,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+} from 'wagmi';
 import { parseEther, formatEther } from 'viem';
-import { AlertCircle } from 'lucide-react';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { AlertCircle, ShieldCheck } from 'lucide-react';
+import { WalletButton } from '@/components/WalletButton';
 import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
-import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
+import { kalyChainTestnet } from '@/blockchain/config/chains';
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
 import { useBlockWatcher } from '../BlockWatcher';
+import { toast } from '@/components/ui/use-toast';
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+/** Normalize a user-entered amount (allows comma decimals) to wei. */
+const toWei = (amount: string): bigint => parseEther(amount.replace(',', '.'));
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,13 +56,28 @@ const governanceTokenABI = [
       { name: 'amount', type: 'uint256' }
     ],
     outputs: []
+  },
+  {
+    name: 'delegates',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'address' }]
+  },
+  {
+    name: 'delegate',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'delegatee', type: 'address' }],
+    outputs: []
   }
 ] as const;
 
 const WrapKLC = () => {
   const [amount, setAmount] = useState('');
   const [activeTab, setActiveTab] = useState<"deposit" | "withdraw">("deposit");
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [lastAction, setLastAction] = useState<'deposit' | 'withdraw' | 'delegate' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -58,19 +87,6 @@ const WrapKLC = () => {
   const governanceTokenAddress = isTestnet
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
-
-  // Debug logging for network detection
-  useEffect(() => {
-    console.log('Network Detection Debug:', {
-      currentChainId: chainId,
-      testnetChainId: kalyChainTestnet.id,
-      mainnetChainId: kalyChainMainnet.id,
-      isTestnet,
-      selectedAddress: governanceTokenAddress,
-      testnetAddress: CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN,
-      mainnetAddress: CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN
-    });
-  }, [chainId, governanceTokenAddress, isTestnet]);
 
   // Get native KLC balance
   const { data: klcBalance, refetch: refetchKLCBalance } = useBalance({
@@ -83,96 +99,126 @@ const WrapKLC = () => {
     token: governanceTokenAddress,
   });
 
-  // Set up block watcher to refresh balances
+  // ERC20Votes voting power is 0 until the holder delegates (even to themselves).
+  const { data: currentDelegate, refetch: refetchDelegate } = useReadContract({
+    address: governanceTokenAddress as `0x${string}`,
+    abi: governanceTokenABI,
+    functionName: 'delegates',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  });
+
+  const isDelegated =
+    !!currentDelegate &&
+    currentDelegate !== ZERO_ADDRESS &&
+    currentDelegate.toLowerCase() === address?.toLowerCase();
+  const hasGklc = !!gklcBalance?.value && gklcBalance.value > 0n;
+
+  // Set up block watcher to refresh balances and delegation status
   useBlockWatcher(() => {
     refetchKLCBalance();
     refetchGKLCBalance();
+    refetchDelegate();
   });
 
-  const { writeContract } = useWriteContract();
+  const { writeContractAsync, data: hash } = useWriteContract();
+  // Pin the receipt watcher to the same chain the wrap/unwrap writes target.
+  const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({ hash, chainId });
+
+  // "Processing" must stay true through mining, not just submission.
+  const isProcessing = isSubmitting || isConfirming;
+
+  // React to a confirmed (mined) transaction: refresh, toast, clear input.
+  useEffect(() => {
+    if (!isConfirmed || !hash) return;
+    refetchKLCBalance();
+    refetchGKLCBalance();
+    refetchDelegate();
+    setAmount('');
+    if (lastAction === 'deposit') {
+      toast({ title: 'KLC wrapped', description: 'Your gKLC balance has been updated.' });
+    } else if (lastAction === 'withdraw') {
+      toast({ title: 'gKLC unwrapped', description: 'Your KLC balance has been updated.' });
+    } else if (lastAction === 'delegate') {
+      toast({ title: 'Voting power activated', description: 'You can now vote and create proposals.' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfirmed, hash]);
 
   const handleWrap = async () => {
-    if (!writeContract || !amount || !address) return;
-
-    setIsProcessing(true);
+    if (!amount || !address) return;
     setError(null);
+    setLastAction('deposit');
+    setIsSubmitting(true);
     try {
-      const gasConfig = getTransactionGasConfig();
-      
-      console.log('Deposit Transaction Debug:', {
-        chainId,
-        isTestnet,
-        governanceTokenAddress,
-        amount,
-        address,
-        gasConfig,
-        value: parseEther(amount).toString()
-      });
-
-      // @ts-ignore
-      const result = await writeContract({
+      // @ts-ignore wagmi v2 generics reject the spread gas-config fields; params are valid at runtime. Gas handling is revisited in the web3-hardening task.
+      await writeContractAsync({
         address: governanceTokenAddress as `0x${string}`,
         abi: governanceTokenABI,
         functionName: 'deposit',
-        value: parseEther(amount),
+        value: toWei(amount),
         args: [],
-        ...gasConfig
+        ...getTransactionGasConfig(),
       });
-
-      console.log('Transaction submitted:', result);
-    } catch (error) {
-      console.error('Error depositing KLC:', error);
-      setError(error instanceof Error ? error.message : 'Failed to deposit KLC. Please try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to deposit KLC. Please try again.');
     } finally {
-      setIsProcessing(false);
-      setAmount('');
+      setIsSubmitting(false);
     }
   };
 
   const handleUnwrap = async () => {
-    if (!writeContract || !amount || !address) return;
-
-    setIsProcessing(true);
+    if (!amount || !address) return;
     setError(null);
+    setLastAction('withdraw');
+    setIsSubmitting(true);
     try {
-      const gasConfig = getTransactionGasConfig();
-
-      console.log('Withdraw Transaction Debug:', {
-        chainId,
-        isTestnet,
-        governanceTokenAddress,
-        amount,
-        address,
-        gasConfig,
-        args: [parseEther(amount).toString()]
-      });
-
-      // @ts-ignore
-      const result = await writeContract({
+      // @ts-ignore wagmi v2 generics reject the spread gas-config fields; params are valid at runtime. Gas handling is revisited in the web3-hardening task.
+      await writeContractAsync({
         address: governanceTokenAddress as `0x${string}`,
         abi: governanceTokenABI,
         functionName: 'withdraw',
-        args: [parseEther(amount)],
-        ...gasConfig
+        args: [toWei(amount)],
+        ...getTransactionGasConfig(),
       });
-
-      console.log('Transaction submitted:', result);
-    } catch (error) {
-      console.error('Error withdrawing gKLC:', error);
-      setError(error instanceof Error ? error.message : 'Failed to withdraw gKLC. Please try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to withdraw gKLC. Please try again.');
     } finally {
-      setIsProcessing(false);
-      setAmount('');
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSelfDelegate = async () => {
+    if (!address) return;
+    setError(null);
+    setLastAction('delegate');
+    setIsSubmitting(true);
+    try {
+      // @ts-ignore wagmi v2 generics reject the spread gas-config fields; params are valid at runtime. Gas handling is revisited in the web3-hardening task.
+      await writeContractAsync({
+        address: governanceTokenAddress as `0x${string}`,
+        abi: governanceTokenABI,
+        functionName: 'delegate',
+        args: [address],
+        ...getTransactionGasConfig(),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delegate. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // Function to handle max button click
   const handleMaxClick = () => {
     if (activeTab === 'deposit') {
-      // For deposits, use the KLC balance minus a small amount for gas
-      const maxAmount = klcBalance?.value ? 
-        formatEther(klcBalance.value - parseEther('0.01')) : '0';
-      setAmount(maxAmount);
+      // For deposits, use the KLC balance minus a small gas buffer. Guard against
+      // underflow when the balance is below the buffer (would go negative).
+      const gasBuffer = parseEther('0.01');
+      const spendable = klcBalance?.value && klcBalance.value > gasBuffer
+        ? klcBalance.value - gasBuffer
+        : 0n;
+      setAmount(formatEther(spendable));
     } else {
       // For withdraws, use the entire gKLC balance
       const maxAmount = gklcBalance?.value ? 
@@ -187,20 +233,22 @@ const WrapKLC = () => {
         <Card>
           <CardContent className="pt-6">
             <div className="flex flex-col items-center justify-center py-6 text-center">
-              <AlertCircle className="h-12 w-12 text-gray-400 mb-4" />
-              <h3 className="text-lg font-medium text-gray-900">
+              <AlertCircle className="h-12 w-12 text-muted-foreground mb-4" />
+              <h3 className="text-lg font-medium text-foreground">
                 Wallet Not Connected
               </h3>
-              <p className="text-gray-500 mt-2 mb-4">
+              <p className="text-muted-foreground mt-2 mb-4">
                 Connect your wallet to wrap or unwrap KLC
               </p>
-              <ConnectButton />
+              <WalletButton />
             </div>
           </CardContent>
         </Card>
       </div>
     );
   }
+
+  const numericAmount = Number(amount.replace(',', '.'));
 
   return (
     <div className="container max-w-2xl mx-auto p-6">
@@ -213,6 +261,27 @@ const WrapKLC = () => {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            {hasGklc && !isDelegated && (
+              <Alert>
+                <ShieldCheck className="h-4 w-4" />
+                <AlertTitle>Activate your voting power</AlertTitle>
+                <AlertDescription>
+                  You hold {gklcBalance?.formatted} gKLC but have{' '}
+                  <span className="font-medium">0 voting power</span> until you delegate. Delegate
+                  to yourself once to vote and create proposals.
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    <Button size="sm" onClick={handleSelfDelegate} disabled={isProcessing}>
+                      {isProcessing && lastAction === 'delegate' ? 'Delegating…' : 'Delegate to myself'}
+                    </Button>
+                    <Link to="/delegation">
+                      <Button size="sm" variant="outline">
+                        More delegation options
+                      </Button>
+                    </Link>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
             {error && (
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />
@@ -221,11 +290,11 @@ const WrapKLC = () => {
               </Alert>
             )}
             <div className="flex flex-col space-y-2">
-              <div className="flex justify-between text-sm text-gray-600">
+              <div className="flex justify-between text-sm text-muted-foreground">
                 <span>Available KLC: {klcBalance?.formatted || '0'}</span>
                 <span>Available gKLC: {gklcBalance?.formatted || '0'}</span>
               </div>
-              <div className="text-sm text-gray-600">
+              <div className="text-sm text-muted-foreground">
                 Network: {isTestnet ? 'Testnet' : 'Mainnet'}
               </div>
             </div>
@@ -265,12 +334,12 @@ const WrapKLC = () => {
                   <Button 
                     className="w-full" 
                     onClick={handleWrap}
-                    disabled={isProcessing || !amount || Number(amount) <= 0 || Number(amount) > Number(klcBalance?.formatted || 0)}
+                    disabled={isProcessing || !amount || numericAmount <= 0 || numericAmount > Number(klcBalance?.formatted || 0)}
                   >
                     {isProcessing ? "Processing..." : "Deposit KLC"}
                   </Button>
                 </div>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   Deposit your KLC to get gKLC at a 1:1 ratio. You can withdraw back to KLC at any time.
                 </p>
               </TabsContent>
@@ -304,12 +373,12 @@ const WrapKLC = () => {
                   <Button 
                     className="w-full" 
                     onClick={handleUnwrap}
-                    disabled={isProcessing || !amount || Number(amount) <= 0 || Number(amount) > Number(gklcBalance?.formatted || 0)}
+                    disabled={isProcessing || !amount || numericAmount <= 0 || numericAmount > Number(gklcBalance?.formatted || 0)}
                   >
                     {isProcessing ? "Processing..." : "Withdraw gKLC"}
                   </Button>
                 </div>
-                <p className="text-sm text-gray-500">
+                <p className="text-sm text-muted-foreground">
                   Withdraw your gKLC back to KLC at any time. Note that you need gKLC to participate in governance.
                 </p>
               </TabsContent>
