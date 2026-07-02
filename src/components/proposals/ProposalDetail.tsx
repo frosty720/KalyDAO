@@ -1332,21 +1332,37 @@ const ProposalDetail = ({
 
   // Vote confirmation handler.
   //
-  // IMPORTANT: only act on a SUCCESSFUL receipt. `useWaitForTransactionReceipt`
-  // also resolves for REVERTED txs (e.g. "already voted") — recording those was
-  // the source of the "ghost votes". We no longer write votes to Supabase at all:
-  // the vote totals and Vote History are read from on-chain `VoteCast` (subgraph
-  // on mainnet, logs on testnet), so ghosts are structurally impossible. We only
-  // update local UI state and re-read the chain.
+  // `useWaitForTransactionReceipt` resolves for BOTH successful AND reverted txs, so we
+  // must handle each. Vote totals / Vote History are read from on-chain `VoteCast`
+  // (subgraph on mainnet, logs on testnet) — never Supabase — so a revert can't create
+  // a ghost vote; we only update local UI state here.
   useEffect(() => {
-    // Only react to a VOTE tx — the shared write hook is also used by queue/execute,
-    // and reacting to those here is what created phantom ABSTAIN rows from queue txs.
-    if (receipt && txHash && receipt.status === 'success' && lastActionRef.current === 'vote') {
+    // Only react to a VOTE tx — the shared write hook is also used by queue/execute
+    // (those are handled by the queueExecuteHash effect above). The lastActionRef guard
+    // keeps this branch from touching their receipts.
+    if (!receipt || !txHash || lastActionRef.current !== 'vote') return;
+
+    if (receipt.status === 'success') {
       lastActionRef.current = null;
       setIsSubmitting(false);
       setUserVote(voteDirection);
       refreshProposalData(); // subgraph (mainnet) / on-chain (testnet): updates votes + has-voted
       setRefetchKey(prev => prev + 1); // refresh on-chain vote history
+    } else {
+      // Mined but REVERTED (already voted, proposal no longer Active, 0 snapshot power…).
+      // Clear the in-flight state so the user isn't stuck on "Processing…", and do NOT
+      // mark them as voted. Clearing lastActionRef here is what prevents a LATER write on
+      // the shared writeContract (e.g. a delegate tx) from being mistaken for this vote
+      // and falsely recording a vote (audit H5).
+      lastActionRef.current = null;
+      setIsSubmitting(false);
+      setVoteStatus(null);
+      toast({
+        title: 'Vote failed',
+        description:
+          'Your vote was reverted on-chain — you may have already voted, or the proposal is no longer accepting votes.',
+        variant: 'destructive',
+      });
     }
   }, [receipt, txHash, voteDirection]);
 
