@@ -19,7 +19,6 @@ import rehypeRaw from 'rehype-raw';
 import remarkGfm from 'remark-gfm';
 import {
   useAccount,
-  useBalance,
   useReadContract,
   useChainId,
   useWriteContract,
@@ -58,6 +57,7 @@ import {
 } from '@/lib/daoSubgraph';
 import { getProposalLifecycleStep } from '@/lib/proposalLifecycle';
 import { resolveDisplayVotes, isSpecialProposal, SPECIAL_PROPOSAL_IDS } from '@/lib/proposalVotes';
+import { resolveVotingPower } from '@/lib/votingPower';
 import { useVoteHistory } from './useVoteHistory';
 import { useDao } from '@/blockchain/hooks/useDao';
 import { ethers } from 'ethers';
@@ -235,6 +235,23 @@ const governanceTokenABI = [
     stateMutability: 'nonpayable',
     inputs: [{ name: 'delegatee', type: 'address' }],
     outputs: []
+  },
+  {
+    name: 'getVotes',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }]
+  },
+  {
+    name: 'getPastVotes',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'account', type: 'address' },
+      { name: 'blockNumber', type: 'uint256' }
+    ],
+    outputs: [{ name: '', type: 'uint256' }]
   }
 ] as const;
 
@@ -296,13 +313,9 @@ const ProposalDetail = ({
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
 
-  const { data: balance } = useBalance({
-    address,
-    chainId: proposalChainId,
-    token: proposalChainId === 3889
-      ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-      : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN,
-  });
+  const governanceTokenAddress = proposalChainId === 3889
+    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
+    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
 
   // Current block on the PROPOSAL's chain (so countdowns/period checks use the right
   // chain, not the wallet's).
@@ -447,6 +460,38 @@ const ProposalDetail = ({
     ? (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined)
     : stateOnChain;
 
+  // ── Voting power the Governor will ACTUALLY count ───────────────────────────
+  // castVote weighs a vote with getPastVotes(voter, snapshot) — delegated power at
+  // the snapshot block, NOT the live balance. Gating/displaying the live balance
+  // let wallets that wrapped/delegated after the snapshot cast 0-weight votes while
+  // the UI showed millions (July 2026 mainnet incident). getPastVotes reverts until
+  // the snapshot block is mined, so it's only enabled once we're past it.
+  const snapshotMined =
+    snapshot !== undefined && snapshot !== null && !!currentBlock &&
+    BigInt(currentBlock) > BigInt(snapshot as bigint);
+
+  const { data: snapshotPowerWei } = useReadContract({
+    address: governanceTokenAddress as `0x${string}`,
+    abi: governanceTokenABI,
+    functionName: 'getPastVotes',
+    args: address && snapshot !== undefined && snapshot !== null
+      ? [address, BigInt(snapshot as bigint)]
+      : undefined,
+    chainId: proposalChainId,
+    query: { enabled: !!address && snapshotMined },
+  });
+
+  // Live delegated power — used as the estimate while a proposal is Pending and to
+  // detect the "you got gKLC after the snapshot" case for the explainer message.
+  const { data: currentPowerWei } = useReadContract({
+    address: governanceTokenAddress as `0x${string}`,
+    abi: governanceTokenABI,
+    functionName: 'getVotes',
+    args: address ? [address] : undefined,
+    chainId: proposalChainId,
+    query: { enabled: !!address },
+  });
+
   // One refresh entry point: poke the subgraph on mainnet, the on-chain reads on testnet.
   const refreshProposalData = useCallback(() => {
     if (hasDaoSubgraph) {
@@ -545,11 +590,6 @@ const ProposalDetail = ({
   const quorumMet = quorumRequired !== null && quorumCurrent >= quorumRequired;
   const quorumProgress =
     quorumRequired && quorumRequired > 0 ? Math.min(100, (quorumCurrent / quorumRequired) * 100) : 0;
-
-  // Get the governance token contract
-  const governanceTokenAddress = proposalChainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
 
   // Check delegation status
   const { data: currentDelegate, refetch: refetchDelegate } = useReadContract({
@@ -785,7 +825,15 @@ const ProposalDetail = ({
     return states[state] || 'Unknown';
   };
 
-  const userVotingPower = Number(balance?.formatted || 0);
+  // Power the Governor will count for THIS proposal (snapshot-based), plus the flag
+  // for "wallet has gKLC now but had none at the snapshot" so the UI can explain
+  // why voting is unavailable instead of showing a number the contract won't honor.
+  const { effectivePowerWei, acquiredAfterSnapshot } = resolveVotingPower({
+    snapshotPowerWei: snapshotPowerWei as bigint | undefined,
+    currentPowerWei: currentPowerWei as bigint | undefined,
+    snapshotMined,
+  });
+  const userVotingPower = Number(effectivePowerWei) / 1e18;
 
   // Rename local function to avoid import conflict
   const formatVoteNumber = (num: number): string => {
@@ -1574,7 +1622,7 @@ const ProposalDetail = ({
               </div>
               {userVotingPower > 0 && (
                 <div>
-                  Your voting power: {formatVoteNumber(userVotingPower)}
+                  Your voting power for this proposal: {formatVoteNumber(userVotingPower)}
                 </div>
               )}
             </div>
@@ -1695,7 +1743,9 @@ const ProposalDetail = ({
                       onChainHasVoted ?
                         'You have already voted on this proposal.' :
                         userVotingPower <= 0 ?
-                          'You need governance tokens to vote on this proposal.' :
+                          (acquiredAfterSnapshot ?
+                            `Your gKLC was received or delegated after this proposal's snapshot (block ${snapshot ? Number(snapshot) : '—'}), so it cannot vote on this proposal. Voting power is locked in when a proposal is created — your tokens will count on every proposal created from now on.` :
+                            'You need governance tokens (delegated before this proposal was created) to vote on this proposal.') :
                           Number(state) === 0 ?
                             'Voting has not started yet.' :
                             Number(state) === 1 ?
