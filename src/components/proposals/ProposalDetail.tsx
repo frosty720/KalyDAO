@@ -881,7 +881,11 @@ const ProposalDetail = ({
 
   // Handle vote
   const handleVote = async (direction: "for" | "against" | "abstain") => {
-    setUserVote(direction);
+    // Record the intended direction (drives the confirm dialog + the tx), but do NOT
+    // mark the user as "voted" here (audit H4). Setting userVote on click meant that
+    // cancelling the dialog — or hitting the not-delegated guard below — permanently
+    // locked the user out of voting for the session. `userVote` is set ONLY from a
+    // successful on-chain receipt (see the vote-confirmation effect).
     setVoteDirection(direction);
     console.log(`handleVote called with direction: ${direction}`);
     console.log(`Current isDelegated state: ${isDelegated}`);

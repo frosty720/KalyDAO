@@ -6,7 +6,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent } from "@/components/ui/card";
 import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
-import { useChainId } from 'wagmi';
+import { useChainId, useReadContract } from 'wagmi';
+import { toTokenAmount, toTokenAmountList } from '@/lib/tokenAmount';
+
+// Minimal ERC20 ABI to read a token's decimals (audit H3 — never assume 18).
+const erc20DecimalsAbi = [
+  {
+    name: 'decimals',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+] as const;
 import { Info, HelpCircle } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -250,9 +262,26 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
   const chainId = useChainId();
 
   // Get contract addresses
-  const addresses = chainId === 3889 
+  const addresses = chainId === 3889
     ? CONTRACT_ADDRESSES_BY_NETWORK.testnet
     : CONTRACT_ADDRESSES_BY_NETWORK.mainnet;
+
+  // Read the ERC20 token's real decimals so transfer amounts are scaled correctly
+  // (audit H3). Enabled only for token-transfer actions with a valid token address.
+  const isErc20Action = actionType === 'transfer-erc20' || actionType === 'transfer-erc20-batch';
+  const isTokenAddress = /^0x[a-fA-F0-9]{40}$/.test(tokenAddress);
+  const {
+    data: tokenDecimalsRaw,
+    isLoading: isLoadingDecimals,
+    isError: isDecimalsError,
+  } = useReadContract({
+    address: isTokenAddress ? (tokenAddress as `0x${string}`) : undefined,
+    abi: erc20DecimalsAbi,
+    functionName: 'decimals',
+    chainId,
+    query: { enabled: isErc20Action && isTokenAddress },
+  });
+  const tokenDecimals = tokenDecimalsRaw === undefined ? undefined : Number(tokenDecimalsRaw);
 
   // Add a new state variable for template vs custom mode
   const [useTemplate, setUseTemplate] = useState<boolean>(true);
@@ -292,16 +321,23 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
           break;
           
         case 'transfer-erc20':
-          if (tokenAddress && recipient && amount && 
-              /^0x[a-fA-F0-9]{40}$/.test(tokenAddress) && 
+          if (tokenAddress && recipient && amount &&
+              /^0x[a-fA-F0-9]{40}$/.test(tokenAddress) &&
               /^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+            // Scale by the token's REAL decimals, never a hardcoded 18 (audit H3). Wait
+            // for the on-chain decimals read before encoding so we never emit a wrong
+            // amount; clear stale calldata to block submission until it resolves.
+            if (tokenDecimals === undefined) {
+              field.onChange('0x');
+              break;
+            }
             const calldata = encodeFunctionData({
               abi: treasuryVaultAbi,
               functionName: 'sendERC20Token',
               args: [
-                tokenAddress as `0x${string}`, 
-                recipient as `0x${string}`, 
-                parseEther(amount)
+                tokenAddress as `0x${string}`,
+                recipient as `0x${string}`,
+                toTokenAmount(amount, tokenDecimals)
               ],
             });
             field.onChange(calldata);
@@ -313,15 +349,21 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
           break;
           
         case 'transfer-erc20-batch':
-          if (tokenAddress && recipients && amounts && 
+          if (tokenAddress && recipients && amounts &&
               /^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+            // Same as single transfer: scale by the token's real decimals (audit H3),
+            // and wait for the decimals read before encoding.
+            if (tokenDecimals === undefined) {
+              field.onChange('0x');
+              break;
+            }
             // Parse comma-separated lists into arrays
             const recipientList = recipients.split(',').map(addr => addr.trim()) as `0x${string}`[];
-            const amountList = amounts.split(',').map(amt => parseEther(amt.trim()));
-            
+            const amountList = toTokenAmountList(amounts, tokenDecimals);
+
             // Validate all recipients are valid addresses
             const allRecipientsValid = recipientList.every(addr => /^0x[a-fA-F0-9]{40}$/.test(addr));
-            
+
             if (allRecipientsValid && recipientList.length === amountList.length) {
               const calldata = encodeFunctionData({
                 abi: treasuryVaultAbi,
@@ -398,7 +440,7 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
       field.onChange('0x');
     }
   }, [
-    actionType, tokenAddress, recipient, recipients, amounts, amount, parameterKey, parameterValue,
+    actionType, tokenAddress, tokenDecimals, recipient, recipients, amounts, amount, parameterKey, parameterValue,
     parameterType, governanceFunction, field, actionIndex,
     updateActionFields, addresses
   ]);
@@ -486,13 +528,17 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
                 step="0.000000000000000001"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Enter the amount in tokens, not wei (e.g., 1000 for 1000 tokens)
+                Enter the amount in whole tokens (e.g., 1000 for 1000 tokens).
+                {isTokenAddress && isLoadingDecimals && ' Reading token decimals…'}
+                {isTokenAddress && isDecimalsError &&
+                  ' ⚠ Could not read this token’s decimals — check the contract address.'}
+                {tokenDecimals !== undefined && ` Token uses ${tokenDecimals} decimals.`}
               </p>
             </div>
           </CardContent>
         </Card>
       )}
-      
+
       {actionType === 'transfer-erc20-batch' && (
         <Card className="p-4 bg-muted/40">
           <CardContent className="space-y-3 pt-4">
@@ -529,7 +575,11 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
                 onChange={(e) => setAmounts(e.target.value)}
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Enter comma-separated list of amounts (must match the number of recipients)
+                Enter comma-separated list of whole-token amounts (must match the number of recipients).
+                {isTokenAddress && isLoadingDecimals && ' Reading token decimals…'}
+                {isTokenAddress && isDecimalsError &&
+                  ' ⚠ Could not read this token’s decimals — check the contract address.'}
+                {tokenDecimals !== undefined && ` Token uses ${tokenDecimals} decimals.`}
               </p>
             </div>
           </CardContent>
