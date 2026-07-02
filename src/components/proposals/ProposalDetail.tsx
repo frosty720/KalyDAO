@@ -59,6 +59,7 @@ import { getProposalLifecycleStep } from '@/lib/proposalLifecycle';
 import { resolveDisplayVotes, isSpecialProposal, SPECIAL_PROPOSAL_IDS } from '@/lib/proposalVotes';
 import { resolveVotingPower } from '@/lib/votingPower';
 import { resolveProposalDataSource } from '@/lib/proposalDataSource';
+import { pickProposalCreatedArgs, computeProposalId, type ProposalCreatedArgs } from '@/lib/proposalExecutionArgs';
 import { useVoteHistory } from './useVoteHistory';
 import { useDao } from '@/blockchain/hooks/useDao';
 import { ethers } from 'ethers';
@@ -1115,6 +1116,81 @@ const ProposalDetail = ({
   }, [txHash]); // Dependency on txHash
 
   // Regular functions that we're keeping
+  // Reconstruct queue()/execute() args from the on-chain ProposalCreated event — the
+  // immutable source of truth — instead of the anon-writable Supabase copy (audit H2).
+  // The Governor recomputes proposalId from these four inputs; a byte of drift reverts
+  // as "unknown proposal id". We find this proposal's creation event, hash its ACTUAL
+  // on-chain description, and verify hashProposal() reconstructs this exact id before
+  // returning — so an edited/absent DB row can no longer brick a passed proposal, and
+  // we never send a transaction that is guaranteed to revert.
+  const getOnChainExecutionArgs = async (): Promise<{
+    targets: `0x${string}`[];
+    values: bigint[];
+    calldatas: `0x${string}`[];
+    descriptionHash: `0x${string}`;
+  }> => {
+    if (!publicClient) throw new Error('No RPC client available for this network.');
+    if (safeProposalId == null) throw new Error('Invalid proposal id.');
+    if (snapshot === undefined || snapshot === null) {
+      throw new Error('Proposal data is still loading — please try again in a moment.');
+    }
+
+    // ProposalCreated has no indexed proposalId, so scan a bounded window ending at the
+    // snapshot block (creation is always <= snapshot) and match by decoded id.
+    const snap = BigInt(snapshot as bigint);
+    const SPAN = 400_000n;  // > mainnet votingDelay (302400) with margin; tiny on testnet
+    const CHUNK = 45_000n;  // matches the getLogs range used elsewhere in this app
+    const startBlock = snap > SPAN ? snap - SPAN : 0n;
+
+    const ranges: Array<[bigint, bigint]> = [];
+    for (let from = startBlock; from <= snap; from += CHUNK + 1n) {
+      const to = from + CHUNK < snap ? from + CHUNK : snap;
+      ranges.push([from, to]);
+    }
+
+    const logChunks = await Promise.all(
+      ranges.map(([fromBlock, toBlock]) =>
+        publicClient
+          .getLogs({
+            address: governorAddress as `0x${string}`,
+            event: proposalCreatedEventAbi,
+            fromBlock,
+            toBlock,
+          })
+          .catch(() => [] as unknown[]),
+      ),
+    );
+    const logs = logChunks.flat() as Array<{ args?: ProposalCreatedArgs }>;
+
+    const args = pickProposalCreatedArgs(logs, safeProposalId);
+    if (!args) {
+      throw new Error(
+        "Couldn't find this proposal's creation event on-chain, so its execution data can't be verified. It cannot be queued or executed from this UI.",
+      );
+    }
+
+    // Verify the reconstructed call hashes back to THIS proposal id (same formula the
+    // Governor uses) before sending anything — locally, so a malicious RPC can't spoof
+    // the check. A mismatch means the event data is unusable; refuse rather than revert.
+    if (computeProposalId(args) !== safeProposalId) {
+      throw new Error(
+        'On-chain proposal data did not reconstruct this proposal id — refusing to send a transaction that would revert.',
+      );
+    }
+
+    // Hash the ACTUAL on-chain description (not the Supabase copy) for the tx args.
+    const descriptionHash = ethers.utils.keccak256(
+      ethers.utils.toUtf8Bytes(args.description),
+    ) as `0x${string}`;
+
+    return {
+      targets: args.targets,
+      values: args.values,
+      calldatas: args.calldatas,
+      descriptionHash,
+    };
+  };
+
   const handleQueue = async () => {
     if (!writeContract || !id || !governorAddress || !address) {
       console.error('Missing required data for queue', { writeContract, id, governorAddress });
@@ -1128,42 +1204,9 @@ const ProposalDetail = ({
     try {
       console.log('Queueing proposal', id);
 
-      // Get parameters from proposalData and convert to the correct types
-      const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
-      const values = (proposalData?.values || []).map(v => BigInt(v));
-      const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
-
-      // Preflight: a proposal with missing/mismatched execution data would revert
-      // with a cryptic "unknown proposal id". Fail clearly instead.
-      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
-        lastActionRef.current = null;
-        setIsQueueing(false);
-        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be queued.');
-        toast({
-          title: 'Cannot queue',
-          description: 'This proposal is missing its on-chain execution data.',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      // Get the ORIGINAL full description text (not the hash)
-      const descriptionText = proposalData?.full_description ||
-        `${proposalData?.title}\n\n${proposalData?.description}`;
-
-      // Calculate the keccak256 hash of the description using ethers
-      // This is what the contract uses internally for hashProposal
-      const descriptionHash = ethers.utils.keccak256(
-        ethers.utils.toUtf8Bytes(descriptionText)
-      ) as `0x${string}`;
-
-      console.log('Queue parameters:', {
-        targets,
-        values,
-        calldatas,
-        descriptionHash,
-        descriptionText: descriptionText.substring(0, 100) + '...' // Log part of the text
-      });
+      // Reconstruct + verify the four call args from the on-chain ProposalCreated event.
+      // Throws (→ catch) with a clear message if the proposal can't be verified.
+      const { targets, values, calldatas, descriptionHash } = await getOnChainExecutionArgs();
 
       // Get transaction gas config from the shared utility
       const gasConfig = getTransactionGasConfig();
@@ -1198,6 +1241,8 @@ const ProposalDetail = ({
         description: error?.message || 'An error occurred while queueing the proposal',
         variant: 'destructive',
       });
+      // No tx was sent — clear the action ref so a later write can't inherit it.
+      lastActionRef.current = null;
       setIsQueueing(false);
     }
   };
@@ -1233,41 +1278,9 @@ const ProposalDetail = ({
 
       console.log('Executing proposal', id);
 
-      // Get parameters from proposalData and convert to the correct types
-      const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
-      const values = (proposalData?.values || []).map(v => BigInt(v));
-      const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
-
-      // Preflight (same as queue): missing/mismatched execution data → clear error.
-      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
-        lastActionRef.current = null;
-        setIsExecuting(false);
-        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be executed.');
-        toast({
-          title: 'Cannot execute',
-          description: 'This proposal is missing its on-chain execution data.',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      // Get the ORIGINAL full description text (not the hash)
-      const descriptionText = proposalData?.full_description ||
-        `${proposalData?.title}\n\n${proposalData?.description}`;
-
-      // Calculate the keccak256 hash of the description using ethers
-      // This is what the contract uses internally for hashProposal
-      const descriptionHash = ethers.utils.keccak256(
-        ethers.utils.toUtf8Bytes(descriptionText)
-      ) as `0x${string}`;
-
-      console.log('Execute parameters:', {
-        targets,
-        values,
-        calldatas,
-        descriptionHash: descriptionHash,
-        descriptionText: descriptionText.substring(0, 100) + '...' // Log part of the text
-      });
+      // Reconstruct + verify the four call args from the on-chain ProposalCreated event
+      // (same source of truth as queue). Throws (→ catch) if it can't be verified.
+      const { targets, values, calldatas, descriptionHash } = await getOnChainExecutionArgs();
 
       // Get transaction gas config from the shared utility
       const gasConfig = getTransactionGasConfig();
@@ -1307,6 +1320,8 @@ const ProposalDetail = ({
         description: error?.message || 'An error occurred while executing the proposal',
         variant: 'destructive',
       });
+      // No tx was sent — clear the action ref so a later write can't inherit it.
+      lastActionRef.current = null;
       setIsExecuting(false);
     }
   };
