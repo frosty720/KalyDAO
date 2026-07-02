@@ -58,6 +58,7 @@ import {
 import { getProposalLifecycleStep } from '@/lib/proposalLifecycle';
 import { resolveDisplayVotes, isSpecialProposal, SPECIAL_PROPOSAL_IDS } from '@/lib/proposalVotes';
 import { resolveVotingPower } from '@/lib/votingPower';
+import { resolveProposalDataSource } from '@/lib/proposalDataSource';
 import { useVoteHistory } from './useVoteHistory';
 import { useDao } from '@/blockchain/hooks/useDao';
 import { ethers } from 'ethers';
@@ -348,6 +349,16 @@ const ProposalDetail = ({
   });
   const sgDetail = sgData?.detail ?? null;
 
+  // Where do votes/quorum/state/blocks/eta come from? Subgraph when it answers, else
+  // on-chain. `subgraphUnavailable` is true when the subgraph is configured but gave
+  // us nothing (down / GraphQL error / not indexed) so the on-chain reads below take
+  // over instead of leaving the page blank (audit H1).
+  const { useOnChainReads, subgraphUnavailable } = resolveProposalDataSource({
+    hasDaoSubgraph,
+    subgraphResponded: sgData !== undefined,
+    hasSubgraphDetail: !!sgDetail,
+  });
+
   const { data: deadlineOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
@@ -355,7 +366,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: proposerOnChain } = useReadContract({
@@ -365,7 +376,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: snapshotOnChain } = useReadContract({
@@ -375,7 +386,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: rawVotesOnChain, refetch: refetchVotesOnChain } = useReadContract({
@@ -385,7 +396,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   // On-chain state(). On mainnet this NEVER auto-fires (enabled:false) — display state
@@ -398,7 +409,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   // Read proposalEta (timestamp when it can be executed) — testnet fallback only.
@@ -410,7 +421,7 @@ const ProposalDetail = ({
      chainId: proposalChainId,
      account: address,
      query: {
-       enabled: !hasDaoSubgraph && !!id && Number(stateOnChain) === 5,
+       enabled: useOnChainReads && !!id && Number(stateOnChain) === 5,
      }
   });
 
@@ -422,7 +433,7 @@ const ProposalDetail = ({
     args: snapshotOnChain ? [BigInt(snapshotOnChain)] : undefined,
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph && !!snapshotOnChain },
+    query: { enabled: useOnChainReads && !!snapshotOnChain },
   });
 
   // On-chain "has this wallet already voted?" — testnet fallback only.
@@ -433,32 +444,34 @@ const ProposalDetail = ({
     args: safeProposalId != null && address ? [safeProposalId, address] : undefined,
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph && !!id && !!address },
+    query: { enabled: useOnChainReads && !!id && !!address },
   });
 
-  // ── Merged values: subgraph on mainnet, on-chain reads on testnet ───────────
+  // ── Merged values: subgraph when it answers, on-chain otherwise ─────────────
   // Downstream code uses these names unchanged (deadline/snapshot/rawVotes/state/…).
-  const deadline = hasDaoSubgraph ? sgDetail?.voteEnd : deadlineOnChain;
-  const proposer = hasDaoSubgraph ? sgDetail?.proposer : proposerOnChain;
-  const snapshot = hasDaoSubgraph ? sgDetail?.voteStart : snapshotOnChain;
+  // `useOnChainReads` is true on testnet AND when the mainnet subgraph is unavailable,
+  // so a subgraph outage transparently falls back to the chain instead of blanking.
+  const deadline = useOnChainReads ? deadlineOnChain : sgDetail?.voteEnd;
+  const proposer = useOnChainReads ? proposerOnChain : sgDetail?.proposer;
+  const snapshot = useOnChainReads ? snapshotOnChain : sgDetail?.voteStart;
   // Memoized: this array is a dependency of the data-fetch effect below, so a fresh
   // reference each render would loop it forever (isLoading never settles).
   const rawVotes = useMemo(
     () =>
-      (hasDaoSubgraph
-        ? sgDetail
+      (useOnChainReads
+        ? rawVotesOnChain
+        : sgDetail
           ? [sgDetail.againstVotes, sgDetail.forVotes, sgDetail.abstainVotes]
-          : undefined
-        : rawVotesOnChain) as readonly [bigint, bigint, bigint] | undefined,
-    [hasDaoSubgraph, sgDetail, rawVotesOnChain],
+          : undefined) as readonly [bigint, bigint, bigint] | undefined,
+    [useOnChainReads, sgDetail, rawVotesOnChain],
   );
-  const quorumRaw = hasDaoSubgraph ? sgDetail?.quorumVotes : quorumRawOnChain;
-  const proposalEta = hasDaoSubgraph ? (sgDetail?.eta ?? undefined) : proposalEtaOnChain;
-  const onChainHasVoted = hasDaoSubgraph ? !!sgData?.voted : hasVotedOnChain;
-  // Live state: derived from the subgraph + current block on mainnet; on-chain on testnet.
-  const state = hasDaoSubgraph
-    ? (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined)
-    : stateOnChain;
+  const quorumRaw = useOnChainReads ? quorumRawOnChain : sgDetail?.quorumVotes;
+  const proposalEta = useOnChainReads ? proposalEtaOnChain : (sgDetail?.eta ?? undefined);
+  const onChainHasVoted = useOnChainReads ? hasVotedOnChain : !!sgData?.voted;
+  // Live state: on-chain state() in fallback/testnet; derived from subgraph + block otherwise.
+  const state = useOnChainReads
+    ? stateOnChain
+    : (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined);
 
   // ── Voting power the Governor will ACTUALLY count ───────────────────────────
   // castVote weighs a vote with getPastVotes(voter, snapshot) — delegated power at
@@ -492,17 +505,17 @@ const ProposalDetail = ({
     query: { enabled: !!address },
   });
 
-  // One refresh entry point: poke the subgraph on mainnet, the on-chain reads on testnet.
+  // One refresh entry point: always poke the subgraph (so an outage can recover), and
+  // refresh the on-chain reads whenever they're the active source (testnet or fallback).
   const refreshProposalData = useCallback(() => {
-    if (hasDaoSubgraph) {
-      void refetchSubgraph();
-      return;
+    if (hasDaoSubgraph) void refetchSubgraph();
+    if (useOnChainReads) {
+      void refetchStateOnChain?.();
+      void refetchVotesOnChain?.();
+      void refetchEtaOnChain?.();
+      if (address) void refetchHasVotedOnChain?.();
     }
-    void refetchStateOnChain?.();
-    void refetchVotesOnChain?.();
-    void refetchEtaOnChain?.();
-    if (address) void refetchHasVotedOnChain?.();
-  }, [hasDaoSubgraph, refetchSubgraph, refetchStateOnChain, refetchVotesOnChain, refetchEtaOnChain, refetchHasVotedOnChain, address]);
+  }, [hasDaoSubgraph, useOnChainReads, refetchSubgraph, refetchStateOnChain, refetchVotesOnChain, refetchEtaOnChain, refetchHasVotedOnChain, address]);
 
   // Vote history from on-chain VoteCast truth (subgraph on mainnet, logs on testnet).
   // Never reads Supabase, so reverted/ghost votes can never appear here.
@@ -521,10 +534,10 @@ const ProposalDetail = ({
   // useBlockNumber({ watch: true }); the refetch fns from wagmi are stable.
   useEffect(() => {
     if (!currentBlock || !id) return;
-    // On mainnet the subgraph self-polls (refetchInterval) and state is derived from
-    // the advancing block — so there is NO per-block RPC. Only the testnet fallback
-    // re-reads on-chain here.
-    if (hasDaoSubgraph) return;
+    // When the subgraph is the source it self-polls (refetchInterval) and state is
+    // derived from the advancing block — so no per-block RPC. Re-read on-chain per block
+    // only when on-chain reads are the active source (testnet, or a mainnet subgraph outage).
+    if (!useOnChainReads) return;
     // Stop polling once the proposal is in a terminal state (Canceled/Defeated/
     // Executed) — those never change, so per-block refetching is pure waste.
     const terminal = [2, 3, 7].includes(Number(state));
@@ -1446,6 +1459,20 @@ const ProposalDetail = ({
         </div>
         <p className="text-muted-foreground mt-2">{proposalData?.description}</p>
       </div>
+
+      {/* Subgraph outage: we've transparently fallen back to on-chain reads, but tell
+          the user why data may load a little slower than usual (audit H1). */}
+      {subgraphUnavailable && (
+        <Alert className="mb-6 border-amber-500/40 bg-amber-500/10">
+          <AlertCircle className="h-4 w-4 text-amber-400" />
+          <AlertTitle className="text-amber-300">Live indexer unavailable</AlertTitle>
+          <AlertDescription className="text-muted-foreground">
+            The DAO indexer isn't responding right now, so vote totals, quorum and status
+            are being read directly from the blockchain. Everything still works — voting,
+            queueing and execution are unaffected — it may just refresh a little slower.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Lifecycle / next-step panel: surfaces queue/execute actions after a vote */}
       {state !== undefined && ![0, 1].includes(Number(state)) && (() => {
