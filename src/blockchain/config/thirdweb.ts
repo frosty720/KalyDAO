@@ -11,8 +11,8 @@
 
 import { createThirdwebClient, defineChain as twDefineChain } from 'thirdweb';
 import { inAppWallet, createWallet } from 'thirdweb/wallets';
-import { kalyChainMainnet, kalyChainTestnet } from './chains';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
+import { kalychain, EXPLORER_URL, GOV_NAME, GOV_SYMBOL } from './chains';
+import { CONTRACT_ADDRESSES } from '../contracts/addresses';
 
 // createThirdwebClient throws on an empty clientId. Fall back to a placeholder so the
 // module never crashes; injected wallets (MetaMask) still work, but the in-app
@@ -31,62 +31,43 @@ export const thirdwebClient = createThirdwebClient({ clientId: CLIENT_ID });
 // Absolute icon URL (thirdweb won't resolve a relative path). Icons only render
 // client-side, where window.location.origin is the live host.
 const ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
-const KLC_ICON = { url: ORIGIN + '/kalychain.png', width: 64, height: 64, format: 'png' as const };
-const KLC_NATIVE = { name: 'KalyChain', symbol: 'KLC', decimals: 18 };
+const NATIVE_ICON = { url: ORIGIN + '/kalychain.png', width: 64, height: 64, format: 'png' as const };
+const NATIVE_CURRENCY = { name: 'KalyChain Monetary Token', symbol: 'KMT', decimals: 18 };
 // Ecosystem token icons are hosted by this app under /public/tokens (copied from
 // kaly-vault). thirdweb needs an ABSOLUTE URL, so prefix with the runtime origin.
 const TOK_BASE = ORIGIN + '/tokens/';
 
-export const twKalyMainnet = twDefineChain({
-  id: kalyChainMainnet.id,
-  name: 'KalyChain',
-  rpc: kalyChainMainnet.rpcUrls.default.http[0],
-  nativeCurrency: KLC_NATIVE,
-  icon: KLC_ICON,
-  blockExplorers: [{ name: 'KalyScan', url: 'https://kalyscan.io' }],
+export const twKalychain = twDefineChain({
+  id: kalychain.id,
+  name: kalychain.name,
+  rpc: kalychain.rpcUrls.default.http[0],
+  nativeCurrency: NATIVE_CURRENCY,
+  icon: NATIVE_ICON,
+  blockExplorers: [{ name: 'KalyScan', url: EXPLORER_URL }],
 });
 
-export const twKalyTestnet = twDefineChain({
-  id: kalyChainTestnet.id,
-  name: 'KalyChain Testnet',
-  rpc: kalyChainTestnet.rpcUrls.default.http[0],
-  nativeCurrency: KLC_NATIVE,
-  icon: KLC_ICON,
-  blockExplorers: [{ name: 'KalyScan', url: 'https://testnet.kalyscan.io' }],
-});
-
-// The DAO is multi-chain (users switch mainnet/testnet). Default the connect button
-// to mainnet; both are offered.
-export const twActiveChain = twKalyMainnet;
-export const thirdwebChains = [twKalyMainnet, twKalyTestnet];
+// ONE chain — the connect button and the bridge both use it.
+export const twActiveChain = twKalychain;
+export const thirdwebChains = [twActiveChain];
 
 /**
- * Ecosystem tokens shown in the in-app wallet's "View Assets" (per chain). Native KLC
- * is shown automatically; this lists the ERC-20s with their logos. gKLC (governance)
- * leads the list; the rest mirror kaly-vault so the boss sees the same tokens/icons.
+ * Ecosystem tokens shown in the in-app wallet's "View Assets". Native KMT is shown
+ * automatically; gKMT (governance) leads the list, the rest are the 3890 tokens from
+ * kalychain-ops/files/kmt-3890/addresses.json (same set/icons as kaly-vault).
  */
 export const SUPPORTED_TOKENS: Record<
   number,
   { address: string; name: string; symbol: string; icon: string }[]
 > = {
-  [kalyChainMainnet.id]: [
-    { address: CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN, name: 'Governance Kaly Coin', symbol: 'gKLC', icon: TOK_BASE + 'klc.png' },
-    { address: '0x069255299Bb729399f3CECaBdc73d15d3D10a2A3', name: 'Wrapped KalyCoin', symbol: 'wKLC', icon: TOK_BASE + 'klc.png' },
-    { address: '0xCC93b84cEed74Dc28c746b7697d6fA477ffFf65a', name: 'KalySwap Token', symbol: 'KSWAP', icon: TOK_BASE + 'kswap.png' },
-    { address: '0xCd02480926317748e95c5bBBbb7D1070b2327f1A', name: 'KUSD Stablecoin', symbol: 'KUSD', icon: TOK_BASE + 'kusd.png' },
-    { address: '0x2CA775C77B922A51FcF3097F52bFFdbc0250D99A', name: 'Tether USD', symbol: 'USDT', icon: TOK_BASE + 'usdt.png' },
-    { address: '0x9cAb0c396cF0F4325913f2269a0b72BD4d46E3A9', name: 'USD Coin', symbol: 'USDC', icon: TOK_BASE + 'usdc.png' },
-    { address: '0x6E92CAC380F7A7B86f4163fad0df2F277B16Edc6', name: 'DAI Token', symbol: 'DAI', icon: TOK_BASE + 'dai.png' },
-    { address: '0xaA77D4a26d432B82DB07F8a47B7f7F623fd92455', name: 'Wrapped BTC', symbol: 'WBTC', icon: TOK_BASE + 'wbtc.png' },
-    { address: '0xfdbB253753dDE60b11211B169dC872AaE672879b', name: 'Ether', symbol: 'ETH', icon: TOK_BASE + 'eth.png' },
-    { address: '0x0e2318b62a096AC68ad2D7F37592CBf0cA9c4Ddb', name: 'Binance', symbol: 'BNB', icon: TOK_BASE + 'bnb.png' },
-    { address: '0x706C9a63d7c8b7Aaf85DDCca52654645f470E8Ac', name: 'Polygon', symbol: 'POL', icon: TOK_BASE + 'pol.png' },
-    { address: '0xdbba43d094bc683f7420d4b5a44cd9d6bf4f1773', name: 'KNETWORK', symbol: 'KNT', icon: TOK_BASE + 'knt.png' },
-  ],
-  [kalyChainTestnet.id]: [
-    { address: CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN, name: 'Governance Kaly Coin', symbol: 'gKLC', icon: TOK_BASE + 'klc.png' },
-    { address: '0xd15F19c457AaaCB7A389B305Dac8611Cd2294c36', name: 'KUSD Stablecoin', symbol: 'KUSD', icon: TOK_BASE + 'kusd.png' },
-    { address: '0x6Fdb0fEd277b878a0d80494b06EA054C99d2fdD2', name: 'Tether USD', symbol: 'USDT', icon: TOK_BASE + 'usdt.png' },
+  [kalychain.id]: [
+    { address: CONTRACT_ADDRESSES.GOVERNANCE_TOKEN, name: GOV_NAME, symbol: GOV_SYMBOL, icon: TOK_BASE + 'klc.png' },
+    { address: '0xf90F0Bd56558Ac12F7FC285571D38181d2feD69b', name: 'Wrapped KMT', symbol: 'WKMT', icon: TOK_BASE + 'klc.png' },
+    { address: '0x6318EcDbae6B469D39C38949eDC671f4bA8A6172', name: 'Tether USD', symbol: 'USDT', icon: TOK_BASE + 'usdt.png' },
+    { address: '0xf00A4b733093C21b0892eae0578F0a926f9370b3', name: 'USD Coin', symbol: 'USDC', icon: TOK_BASE + 'usdc.png' },
+    { address: '0x8fbff791fCcF596DEf2e788549d0275557F95A21', name: 'DAI Token', symbol: 'DAI', icon: TOK_BASE + 'dai.png' },
+    { address: '0xE3f1A8Af16d2Dcd0B6F1F813C449375f85C9d97F', name: 'Wrapped BTC', symbol: 'WBTC', icon: TOK_BASE + 'wbtc.png' },
+    { address: '0x73b8fBACFF08DafD9a0a6cB8699C64a488d9EA2a', name: 'Ether', symbol: 'ETH', icon: TOK_BASE + 'eth.png' },
+    { address: '0xFDb3307a16442ed5A7C040AE1600a3B3D3C8e7D9', name: 'KUSD Stablecoin', symbol: 'KUSD', icon: TOK_BASE + 'kusd.png' },
   ],
 };
 

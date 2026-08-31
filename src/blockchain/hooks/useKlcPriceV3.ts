@@ -1,29 +1,26 @@
 import { useEffect, useState } from 'react';
 
-// KLC price from the KalySwap V3 subgraph — the same source kaly-vault uses.
-// WKLC is the V3 base token (derivedETH = 1), so KLC price = bundle.ethPriceUSD.
-// Env-overridable; defaults to the production V3 subgraph (matches kaly-vault).
+// KMT price from the KalySwap V3 subgraph — the same source kaly-vault uses.
+// WKMT is the V3 base token (derivedETH = 1), so KMT price = bundle.ethPriceUSD.
+// Env-overridable; defaults to the kmt V3 subgraph (matches kaly-vault).
 const V3_SUBGRAPH_URL =
-  import.meta.env.VITE_V3_SUBGRAPH_URL ||
-  'https://app.kalyswap.io/subgraphs/name/v3-subgraph-kalychain-mainnet';
+  import.meta.env.VITE_V3_SUBGRAPH_URL || 'https://app.kalyswap.io/subgraphs/name/v3-subgraph-kmt';
 
-// WKLC (V3 base token) — its hourly priceUSD IS the KLC/USD history, used for the
-// 24h change so it stays consistent with the displayed price. Env-overridable.
-const WKLC_ADDRESS = (
-  import.meta.env.VITE_WKLC_ADDRESS || '0x069255299Bb729399f3CECaBdc73d15d3D10a2A3'
-).toLowerCase();
+// WKMT (V3 base token) — its hourly priceUSD IS the KMT/USD history, used for the
+// 24h change so it stays consistent with the displayed price.
+const WKMT_ADDRESS = '0xf90F0Bd56558Ac12F7FC285571D38181d2feD69b'.toLowerCase();
 
 export interface KlcPriceV3 {
-  /** Live KLC/USD price (bundle.ethPriceUSD). null while loading / unavailable. */
+  /** Live KMT/USD price (bundle.ethPriceUSD). null while loading / unavailable. */
   price: number | null;
   /** Rolling 24h change in %, from the V3 price 24h ago. null if not computable. */
   change24h: number | null;
 }
 
 /**
- * Live KLC price + 24h change from the V3 subgraph. Both figures come from the same
+ * Live KMT price + 24h change from the V3 subgraph. Both figures come from the same
  * on-chain KalySwap source, so the % sign always matches the price move (unlike the
- * old CoinGecko feed, which reported a stale/opposite change for KLC).
+ * retired CoinGecko feed, which reported a stale/opposite change).
  */
 export function useKlcPriceV3(): KlcPriceV3 {
   const [data, setData] = useState<KlcPriceV3>({ price: null, change24h: null });
@@ -36,7 +33,7 @@ export function useKlcPriceV3(): KlcPriceV3 {
         const target = Math.floor(Date.now() / 1000) - 86_400;
         const query = `{
           bundles(first: 1) { ethPriceUSD }
-          tokenHourDatas(first: 48, orderBy: periodStartUnix, orderDirection: desc, where: { token: "${WKLC_ADDRESS}" }) {
+          tokenHourDatas(first: 48, orderBy: periodStartUnix, orderDirection: desc, where: { token: "${WKMT_ADDRESS}" }) {
             periodStartUnix
             priceUSD
           }

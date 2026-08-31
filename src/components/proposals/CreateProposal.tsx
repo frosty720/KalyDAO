@@ -15,8 +15,8 @@ import {
 } from 'wagmi';
 import { type Abi } from 'viem';
 import { WalletButton } from '@/components/WalletButton';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
-import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
+import { kalychain } from '@/blockchain/config/chains';
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
 import { parseEther } from 'viem';
 import { supabase } from '@/lib/supabase';
@@ -162,7 +162,7 @@ const governorAbi = [
 ] as const;
 
 const CreateProposal = ({
-  minProposalThreshold = 100000,
+  minProposalThreshold = 0,
 }: CreateProposalProps) => {
   const navigate = useNavigate();
   // Using toast imported from "@/components/ui/use-toast"
@@ -179,9 +179,7 @@ const CreateProposal = ({
   const { contracts } = useDao();
   
   // Get the correct token address based on current network
-  const governanceTokenAddress = chainId === 3889 
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
+  const governanceTokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN;
 
   const { data: balance, isError: balanceError, isLoading: balanceLoading } = useBalance({
     address,
@@ -221,19 +219,26 @@ const CreateProposal = ({
     query: { enabled: !!address },
   });
 
+  // Get the correct governor contract address based on current network
+  const governorAddress = CONTRACT_ADDRESSES.GOVERNOR_CONTRACT;
+
+  // The proposal threshold is a Governor parameter (0 on 3890 at launch), not a UI constant.
+  const { data: onChainThreshold } = useReadContract({
+    address: governorAddress as `0x${string}`,
+    abi: [{ name: 'proposalThreshold', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }] }] as const,
+    functionName: 'proposalThreshold',
+    chainId,
+  });
+
   const tokenBalance = balance ? parseFloat(balance.formatted) : 0;
   const userVotingPower = votesRaw !== undefined ? Number(votesRaw) / 1e18 : 0; // display only
   // Compare in EXACT wei, not floats: Number(100000e18)/1e18 rounds to 99999.9999…,
   // so a holder with exactly the threshold would wrongly fail `>= minProposalThreshold`.
-  const thresholdRaw = BigInt(Math.floor(minProposalThreshold)) * 10n ** 18n;
+  const thresholdRaw = (onChainThreshold as bigint | undefined) ?? BigInt(Math.floor(minProposalThreshold)) * 10n ** 18n;
+  const thresholdDisplay = Number(thresholdRaw) / 1e18;
   const hasEnoughVotingPower = votesRaw !== undefined && (votesRaw as bigint) >= thresholdRaw;
   // Holds tokens but hasn't activated enough of them by delegating.
   const needsDelegation = tokenBalance > 0 && !hasEnoughVotingPower;
-
-  // Get the correct governor contract address based on current network
-  const governorAddress = chainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
 
   const { data: hash, writeContract, isPending, error: writeError } = useWriteContract();
 
@@ -290,7 +295,7 @@ const CreateProposal = ({
           // which stalls forever when the (flaky) testnet RPC hiccups — leaving the UI
           // stuck on "Creating Proposal...". A direct poll tolerates transient errors
           // and is bounded by a hard timeout so the flow always resolves.
-          const provider = new ethers.providers.JsonRpcProvider((chainId === 3889 ? kalyChainTestnet : kalyChainMainnet).rpcUrls.default.http[0]);
+          const provider = new ethers.providers.JsonRpcProvider(kalychain.rpcUrls.default.http[0]);
           console.log('Waiting for transaction confirmation...');
           let receipt: ethers.providers.TransactionReceipt | null = null;
           const deadline = Date.now() + 150_000; // up to 2.5 min
@@ -368,7 +373,7 @@ const CreateProposal = ({
                 full_description: fullProposalText, // Save the full text used for hashing
                 proposer_address: onChainData.proposer,
                 created_by: address || '',
-                chain_id: chainId,
+                chain_id: kalychain.id,
                 state: stateMap[stateValue] || 'Pending', // Use string state value
                 votes_for: 0,
                 votes_against: 0,
@@ -455,7 +460,7 @@ const CreateProposal = ({
       console.log('Getting on-chain data for proposal:', proposalId);
       
       // Create provider and contract instances
-      const provider = new ethers.providers.JsonRpcProvider((chainId === 3889 ? kalyChainTestnet : kalyChainMainnet).rpcUrls.default.http[0]);
+      const provider = new ethers.providers.JsonRpcProvider(kalychain.rpcUrls.default.http[0]);
       
       // Get governor contract instance
       const governorContract = new ethers.Contract(
@@ -700,7 +705,7 @@ const CreateProposal = ({
   };
 
   // Get the current chain configuration
-  const currentChain = chainId === 3889 ? kalyChainTestnet : kalyChainMainnet;
+  const currentChain = kalychain;
 
   // Function to allow ActionBuilder to update parent form state
   const updateActionFields = (index: number, updates: { target?: string; value?: string }) => {
@@ -725,9 +730,7 @@ const CreateProposal = ({
       let actions: { target: `0x${string}`; value: bigint; calldata: `0x${string}` }[];
 
       if (proposalType === 'signaling') {
-        const daoSettingsAddress = (chainId === 3889
-          ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.DAO_SETTINGS
-          : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.DAO_SETTINGS) as `0x${string}`;
+        const daoSettingsAddress = CONTRACT_ADDRESSES.DAO_SETTINGS as `0x${string}`;
         const signal = buildSignalingAction(daoSettingsAddress, formData.title);
         actions = [{ target: signal.target, value: BigInt(signal.value), calldata: signal.calldata }];
       } else {
@@ -799,12 +802,13 @@ const CreateProposal = ({
         </h1>
         <p className="text-muted-foreground mt-2">
           Submit a proposal for the KalyChain DAO to vote on. Proposals require
-          a minimum of {minProposalThreshold.toLocaleString()} gKLC (Governance KLC) voting power
-          to create.
+          {thresholdDisplay > 0
+            ? `a minimum of ${thresholdDisplay.toLocaleString()} gKMT (Governance KMT) voting power to create.`
+            : 'delegated gKMT voting power to create (the current proposal threshold is 0).'}
         </p>
         {chainId && (
           <p className="text-sm text-muted-foreground mt-1">
-            Network: {chainId === 3889 ? 'Testnet' : 'Mainnet'} | Your voting power: {userVotingPower.toLocaleString()} gKLC
+            Network: {kalychain.name} ({chainId}) | Your voting power: {userVotingPower.toLocaleString()} gKMT
           </p>
         )}
       </div>
@@ -831,14 +835,14 @@ const CreateProposal = ({
             <AlertTitle>{needsDelegation ? 'Activate Your Voting Power' : 'Insufficient Voting Power'}</AlertTitle>
             <AlertDescription>
               {needsDelegation ? (
-                <>You hold {tokenBalance.toLocaleString()} gKLC but your active voting
+                <>You hold {tokenBalance.toLocaleString()} gKMT but your active voting
                 power is {userVotingPower.toLocaleString()} — voting power only counts
                 once you delegate it (even to yourself). Visit the Delegation page to
                 activate it, then you can propose.</>
               ) : (
-                <>You need at least {minProposalThreshold.toLocaleString()} gKLC voting
+                <>You need at least {thresholdDisplay.toLocaleString()} gKMT voting
                 power to create a proposal. You currently have{" "}
-                {userVotingPower.toLocaleString()} gKLC.</>
+                {userVotingPower.toLocaleString()} gKMT.</>
               )}
             </AlertDescription>
           </Alert>
@@ -847,19 +851,19 @@ const CreateProposal = ({
             <CardHeader>
               <CardTitle>Need Voting Power?</CardTitle>
               <CardDescription>
-                To participate in governance, you need to wrap your KLC tokens to gKLC
+                To participate in governance, you need to wrap your KMT tokens to gKMT
               </CardDescription>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground mb-4">
-                gKLC (Governance KLC) is the governance token that gives you voting power in the DAO.
-                You can wrap your KLC tokens to gKLC and unwrap them back at any time.
+                gKMT (Governance KMT) is the governance token that gives you voting power in the DAO.
+                You can wrap your KMT tokens to gKMT and unwrap them back at any time.
               </p>
               <Link
                 to="/wrap-klc"
                 className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
               >
-                Wrap KLC to gKLC
+                Wrap KMT to gKMT
                 <ExternalLink className="ml-2 h-4 w-4" />
               </Link>
             </CardContent>

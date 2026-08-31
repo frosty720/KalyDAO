@@ -1,12 +1,12 @@
 import { Suspense, type ReactNode } from "react";
-import { useRoutes, Routes, Route } from "react-router-dom";
+import { useRoutes, Routes, Route, Navigate } from "react-router-dom";
 import Home from "./components/home";
 import Layout from "./components/layout/Layout";
 import ProposalsPage from "./components/proposals/ProposalsPage";
 import ProposalDetail from "./components/proposals/ProposalDetail";
+import GovernanceArchive from "./components/archive/GovernanceArchive";
 import CreateProposal from "./components/proposals/CreateProposal";
 import WrapKLC from "./components/wrap/WrapKLC";
-import ApiTest from "./components/test/ApiTest";
 import NotFound from "./components/layout/NotFound";
 import VotingGuide from "./components/static/VotingGuide";
 import CommunityGuidelines from "./components/static/CommunityGuidelines";
@@ -20,6 +20,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { wagmiConfig } from './blockchain/config/wagmi';
 import { useThirdwebWagmiBridge } from './blockchain/config/thirdwebBridge';
 import BlockWatcher from './components/BlockWatcher';
+import CutoverNotice from './components/CutoverNotice';
 import { DelegationManager } from '@/components/governance/DelegationManager';
 
 // Create a client for TanStack Query
@@ -41,14 +42,17 @@ function App() {
           <Suspense fallback={<p>Loading...</p>}>
             <>
               <BlockWatcher />
+              <CutoverNotice />
               <Routes>
                 <Route element={<Layout />}>
                   <Route path="/" element={<Home />} />
                   <Route path="/proposals" element={<ProposalsPage />} />
                   <Route path="/proposals/:id" element={<ProposalDetail />} />
+                  <Route path="/archive" element={<GovernanceArchive />} />
                   <Route path="/create-proposal" element={<CreateProposal />} />
-                  <Route path="/wrap-klc" element={<WrapKLC />} />
-                  <Route path="/test/api" element={<ApiTest />} />
+                  <Route path="/wrap-kmt" element={<WrapKLC />} />
+                  {/* old bookmark */}
+                  <Route path="/wrap-klc" element={<Navigate to="/wrap-kmt" replace />} />
                   <Route path="/delegation" element={<DelegationManager />} />
                   <Route path="/voting-guide" element={<VotingGuide />} />
                   <Route path="/community-guidelines" element={<CommunityGuidelines />} />

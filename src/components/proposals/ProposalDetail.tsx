@@ -28,7 +28,7 @@ import {
   usePublicClient
 } from 'wagmi';
 import { WalletButton } from '@/components/WalletButton';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
@@ -66,7 +66,7 @@ import { ethers } from 'ethers';
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
-import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
+import { kalychain } from '@/blockchain/config/chains';
 import { CountdownTimer } from './CountdownTimer';
 import { toast } from "@/components/ui/use-toast";
 import { type Abi, type AbiEvent, decodeEventLog, parseGwei } from 'viem';
@@ -302,7 +302,7 @@ const ProposalDetail = ({
   const proposalChainId =
     ((proposalData as { chain_id?: number } | null)?.chain_id) ?? chainId;
   const isWrongNetwork = !!proposalData && chainId !== proposalChainId;
-  const currentChain = proposalChainId === 3889 ? kalyChainTestnet : kalyChainMainnet;
+  const currentChain = kalychain;
 
   const { data: txHash, error: writeError, isPending: isWritePending, writeContract } = useWriteContract();
   // Pin the receipt watcher to the PROPOSAL's chain (same as every read/write here), so
@@ -311,13 +311,8 @@ const ProposalDetail = ({
   const publicClient = usePublicClient();
 
   // Get the correct contract addresses based on the PROPOSAL's network
-  const governorAddress = proposalChainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
-
-  const governanceTokenAddress = proposalChainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
+  const governorAddress = CONTRACT_ADDRESSES.GOVERNOR_CONTRACT;
+  const governanceTokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN;
 
   // Current block on the PROPOSAL's chain (so countdowns/period checks use the right
   // chain, not the wallet's).
@@ -333,7 +328,7 @@ const ProposalDetail = ({
   // subgraph (deriveProposalState) for display; the on-chain `state()` read is kept
   // lazy (enabled:false on mainnet) and only refetched on demand as the queue/execute
   // gate, where an authoritative, lag-free value matters.
-  const daoSubgraphUrl = getDaoSubgraphUrl(proposalChainId);
+  const daoSubgraphUrl = getDaoSubgraphUrl();
   const hasDaoSubgraph = !!daoSubgraphUrl;
 
   const { data: sgData, refetch: refetchSubgraph } = useQuery({
@@ -496,7 +491,7 @@ const ProposalDetail = ({
   });
 
   // Live delegated power — used as the estimate while a proposal is Pending and to
-  // detect the "you got gKLC after the snapshot" case for the explainer message.
+  // detect the "you got gKMT after the snapshot" case for the explainer message.
   const { data: currentPowerWei } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
     abi: governanceTokenABI,
@@ -555,7 +550,7 @@ const ProposalDetail = ({
   useEffect(() => {
     if (!id) return;
     supabase
-      .rpc('increment_proposal_views', { proposal_id_param: id })
+      .rpc('increment_proposal_views', { p_proposal_id: id })
       .then(undefined, (e: unknown) => console.warn('Failed to increment views:', e));
   }, [id]);
 
@@ -840,7 +835,7 @@ const ProposalDetail = ({
   };
 
   // Power the Governor will count for THIS proposal (snapshot-based), plus the flag
-  // for "wallet has gKLC now but had none at the snapshot" so the UI can explain
+  // for "wallet has gKMT now but had none at the snapshot" so the UI can explain
   // why voting is unavailable instead of showing a number the contract won't honor.
   const { effectivePowerWei, acquiredAfterSnapshot } = resolveVotingPower({
     snapshotPowerWei: snapshotPowerWei as bigint | undefined,
@@ -1142,7 +1137,7 @@ const ProposalDetail = ({
     // ProposalCreated has no indexed proposalId, so scan a bounded window ending at the
     // snapshot block (creation is always <= snapshot) and match by decoded id.
     const snap = BigInt(snapshot as bigint);
-    const SPAN = 400_000n;  // > mainnet votingDelay (302400) with margin; tiny on testnet
+    const SPAN = 400_000n;  // > votingDelay (43,200 on 3890) with wide margin
     const CHUNK = 45_000n;  // matches the getLogs range used elsewhere in this app
     const startBlock = snap > SPAN ? snap - SPAN : 0n;
 
@@ -1224,7 +1219,11 @@ const ProposalDetail = ({
         args: [targets, values, calldatas, descriptionHash],
         chain: currentChain,
         account: address,
-        ...gasConfig
+        ...gasConfig,
+        // queue() hashes and stores every action in the Timelock, so a multi-action
+        // proposal can exceed the ~300k default. Match propose()'s headroom
+        // (unused gas is refunded).
+        gas: 1_500_000n,
       });
 
       console.log('Queue transaction initiated');
@@ -1799,14 +1798,14 @@ const ProposalDetail = ({
                 <div className="bg-secondary p-4 rounded-md">
                   <p className="text-sm text-muted-foreground">
                     {isWrongNetwork ?
-                      `This proposal is on KalyChain ${proposalChainId === 3889 ? 'Testnet' : 'Mainnet'}. Switch your wallet to that network to vote.` :
+                      `This proposal is on ${kalychain.name} (chain ${proposalChainId}). Switch your wallet to that network to vote.` :
                       userVote ?
                       `You voted ${displayVoteType(userVote)} on this proposal with ${formatVoteNumber(userVotingPower)} voting power.` :
                       onChainHasVoted ?
                         'You have already voted on this proposal.' :
                         userVotingPower <= 0 ?
                           (acquiredAfterSnapshot ?
-                            `Your gKLC was received or delegated after this proposal's snapshot (block ${snapshot ? Number(snapshot) : '—'}), so it cannot vote on this proposal. Voting power is locked in when a proposal is created — your tokens will count on every proposal created from now on.` :
+                            `Your gKMT was received or delegated after this proposal's snapshot (block ${snapshot ? Number(snapshot) : '—'}), so it cannot vote on this proposal. Voting power is locked in when a proposal is created — your tokens will count on every proposal created from now on.` :
                             'You need governance tokens (delegated before this proposal was created) to vote on this proposal.') :
                           Number(state) === 0 ?
                             'Voting has not started yet.' :

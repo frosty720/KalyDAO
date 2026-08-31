@@ -11,8 +11,8 @@ import {
 import { parseEther, formatEther } from 'viem';
 import { AlertCircle, ShieldCheck } from 'lucide-react';
 import { WalletButton } from '@/components/WalletButton';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
-import { kalyChainTestnet } from '@/blockchain/config/chains';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
+import { kalychain } from '@/blockchain/config/chains';
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
 import { useBlockWatcher } from '../BlockWatcher';
 import { toast } from '@/components/ui/use-toast';
@@ -82,18 +82,14 @@ const WrapKLC = () => {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
 
-  // Get the correct token address based on current network
-  const isTestnet = chainId === kalyChainTestnet.id;
-  const governanceTokenAddress = isTestnet
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
+  const governanceTokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN;
 
-  // Get native KLC balance
+  // Get native KMT balance
   const { data: klcBalance, refetch: refetchKLCBalance } = useBalance({
     address,
   });
 
-  // Get gKLC balance
+  // Get gKMT balance
   const { data: gklcBalance, refetch: refetchGKLCBalance } = useBalance({
     address,
     token: governanceTokenAddress,
@@ -136,9 +132,9 @@ const WrapKLC = () => {
     refetchDelegate();
     setAmount('');
     if (lastAction === 'deposit') {
-      toast({ title: 'KLC wrapped', description: 'Your gKLC balance has been updated.' });
+      toast({ title: 'KMT wrapped', description: 'Your gKMT balance has been updated.' });
     } else if (lastAction === 'withdraw') {
-      toast({ title: 'gKLC unwrapped', description: 'Your KLC balance has been updated.' });
+      toast({ title: 'gKMT unwrapped', description: 'Your KMT balance has been updated.' });
     } else if (lastAction === 'delegate') {
       toast({ title: 'Voting power activated', description: 'You can now vote and create proposals.' });
     }
@@ -161,7 +157,7 @@ const WrapKLC = () => {
         ...getTransactionGasConfig(),
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to deposit KLC. Please try again.');
+      setError(err instanceof Error ? err.message : 'Failed to deposit KMT. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -182,7 +178,7 @@ const WrapKLC = () => {
         ...getTransactionGasConfig(),
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to withdraw gKLC. Please try again.');
+      setError(err instanceof Error ? err.message : 'Failed to withdraw gKMT. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -212,7 +208,7 @@ const WrapKLC = () => {
   // Function to handle max button click
   const handleMaxClick = () => {
     if (activeTab === 'deposit') {
-      // For deposits, use the KLC balance minus a small gas buffer. Guard against
+      // For deposits, use the KMT balance minus a small gas buffer. Guard against
       // underflow when the balance is below the buffer (would go negative).
       const gasBuffer = parseEther('0.01');
       const spendable = klcBalance?.value && klcBalance.value > gasBuffer
@@ -220,7 +216,7 @@ const WrapKLC = () => {
         : 0n;
       setAmount(formatEther(spendable));
     } else {
-      // For withdraws, use the entire gKLC balance
+      // For withdraws, use the entire gKMT balance
       const maxAmount = gklcBalance?.value ? 
         formatEther(gklcBalance.value) : '0';
       setAmount(maxAmount);
@@ -238,7 +234,7 @@ const WrapKLC = () => {
                 Wallet Not Connected
               </h3>
               <p className="text-muted-foreground mt-2 mb-4">
-                Connect your wallet to wrap or unwrap KLC
+                Connect your wallet to wrap or unwrap KMT
               </p>
               <WalletButton />
             </div>
@@ -254,9 +250,9 @@ const WrapKLC = () => {
     <div className="container max-w-2xl mx-auto p-6">
       <Card>
         <CardHeader>
-          <CardTitle>Wrap/Unwrap KLC</CardTitle>
+          <CardTitle>Wrap/Unwrap KMT</CardTitle>
           <CardDescription>
-            Deposit KLC to get gKLC for governance participation, or withdraw your gKLC back to KLC
+            Deposit KMT to get gKMT for governance participation, or withdraw your gKMT back to KMT
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -266,7 +262,7 @@ const WrapKLC = () => {
                 <ShieldCheck className="h-4 w-4" />
                 <AlertTitle>Activate your voting power</AlertTitle>
                 <AlertDescription>
-                  You hold {gklcBalance?.formatted} gKLC but have{' '}
+                  You hold {gklcBalance?.formatted} gKMT but have{' '}
                   <span className="font-medium">0 voting power</span> until you delegate. Delegate
                   to yourself once to vote and create proposals.
                   <div className="flex flex-wrap gap-2 mt-3">
@@ -291,11 +287,11 @@ const WrapKLC = () => {
             )}
             <div className="flex flex-col space-y-2">
               <div className="flex justify-between text-sm text-muted-foreground">
-                <span>Available KLC: {klcBalance?.formatted || '0'}</span>
-                <span>Available gKLC: {gklcBalance?.formatted || '0'}</span>
+                <span>Available KMT: {klcBalance?.formatted || '0'}</span>
+                <span>Available gKMT: {gklcBalance?.formatted || '0'}</span>
               </div>
               <div className="text-sm text-muted-foreground">
-                Network: {isTestnet ? 'Testnet' : 'Mainnet'}
+                Network: {kalychain.name} ({chainId})
               </div>
             </div>
 
@@ -336,11 +332,11 @@ const WrapKLC = () => {
                     onClick={handleWrap}
                     disabled={isProcessing || !amount || numericAmount <= 0 || numericAmount > Number(klcBalance?.formatted || 0)}
                   >
-                    {isProcessing ? "Processing..." : "Deposit KLC"}
+                    {isProcessing ? "Processing..." : "Deposit KMT"}
                   </Button>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Deposit your KLC to get gKLC at a 1:1 ratio. You can withdraw back to KLC at any time.
+                  Deposit your KMT to get gKMT at a 1:1 ratio. You can withdraw back to KMT at any time.
                 </p>
               </TabsContent>
 
@@ -375,11 +371,11 @@ const WrapKLC = () => {
                     onClick={handleUnwrap}
                     disabled={isProcessing || !amount || numericAmount <= 0 || numericAmount > Number(gklcBalance?.formatted || 0)}
                   >
-                    {isProcessing ? "Processing..." : "Withdraw gKLC"}
+                    {isProcessing ? "Processing..." : "Withdraw gKMT"}
                   </Button>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Withdraw your gKLC back to KLC at any time. Note that you need gKLC to participate in governance.
+                  Withdraw your gKMT back to KMT at any time. Note that you need gKMT to participate in governance.
                 </p>
               </TabsContent>
             </Tabs>

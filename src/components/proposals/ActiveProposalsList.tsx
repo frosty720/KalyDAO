@@ -19,7 +19,8 @@ import {
 } from "@/components/ui/select";
 import { supabase } from "@/lib/supabase";
 import { useToast } from "@/components/ui/use-toast";
-import { useChainId, useAccount, useBlockNumber } from "wagmi";
+import { useBlockNumber } from "wagmi";
+import { kalychain } from "@/blockchain/config/chains";
 import { isSpecialProposal } from "@/lib/proposalVotes";
 import { getDaoSubgraphUrl, queryProposalTotals } from "@/lib/daoSubgraph";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -103,11 +104,8 @@ const ActiveProposalsList = ({
   const [error, setError] = useState<string | null>(null);
   const [showingRecentProposals, setShowingRecentProposals] = useState<boolean>(false);
   const { toast } = useToast();
-  const walletChainId = useChainId();
-  const { isConnected } = useAccount();
-  // When no wallet is connected, default to mainnet (3888) instead of whatever the
-  // wagmi config last persisted (which could be testnet).
-  const chainId = isConnected ? walletChainId : 3888;
+  // ONE chain: proposals are stored and read for KalyChain 3890 regardless of the wallet.
+  const chainId = kalychain.id;
   // Current block on the active chain — used to turn deadline BLOCK numbers into
   // real "time remaining" (deadline_timestamp is a block number, not unix time).
   const { data: currentBlockData } = useBlockNumber({ chainId, watch: true });
@@ -143,7 +141,7 @@ const ActiveProposalsList = ({
         // Overlay accurate vote totals from the DAO subgraph (on-chain truth). Supabase
         // no longer counts votes. Only mainnet has a subgraph; testnet keeps Supabase.
         // Special P1/P2 keep their injected display values (never overlaid).
-        const subUrl = getDaoSubgraphUrl(chainId);
+        const subUrl = getDaoSubgraphUrl();
         const totalsMap = new Map<string, { for: number; against: number; abstain: number }>();
         if (subUrl) {
           const totals = await queryProposalTotals(subUrl);

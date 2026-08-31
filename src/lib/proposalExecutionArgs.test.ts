@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { pickProposalCreatedArgs, computeProposalId } from './proposalExecutionArgs';
 
-const T = '0x92564ec0d22BBd5e3FF978B977CA968e6c7d1c44';
+const T = '0xDF8CFefEa7DaA5E5B23c262A461aCcA6356BCA90'; // 3890 Treasury
 const goodLog = (id: bigint) => ({
 	args: {
 		proposalId: id,

@@ -1,4 +1,4 @@
-import { ConnectButton, darkTheme, useActiveWalletChain } from 'thirdweb/react';
+import { ConnectButton, darkTheme } from 'thirdweb/react';
 import {
   thirdwebClient,
   thirdwebChains,
@@ -34,17 +34,15 @@ export function WalletButton({
   compact?: boolean;
   label?: string;
 }) {
-  // The DAO is multi-network. Follow the wallet's ACTIVE chain so the button never
-  // forces a "Switch Network" back to mainnet when the user is on testnet. New
-  // connections (no active chain yet) default to mainnet. Both chains stay available
-  // in the account modal's network switcher via `chains`.
-  const activeChain = useActiveWalletChain();
+  // ONE chain since the KMT relaunch: always pin the button to 3890 so a wallet
+  // still sitting on the pre-relaunch KalyChain entry is prompted to switch instead
+  // of silently staying on a dead network.
   return (
     <ConnectButton
       client={thirdwebClient}
       wallets={allWallets}
       chains={thirdwebChains}
-      chain={activeChain ?? twActiveChain}
+      chain={twActiveChain}
       supportedTokens={SUPPORTED_TOKENS}
       theme={daoTheme}
       connectButton={{

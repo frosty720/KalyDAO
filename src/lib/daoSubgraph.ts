@@ -1,14 +1,13 @@
 // DAO subgraph data layer.
 //
-// The KalyDAO Governor subgraph (deployed as `dao-subgraph-kalychain-mainnet`) is
-// the source of truth for multi-proposal vote totals and vote history. Vote weights
-// are the real on-chain `VoteCast.weight`, so Supabase no longer counts votes.
+// The KalyDAO Governor subgraph (deployed as `dao-subgraph-kmt` on the kalyswap
+// graph-node) is the source of truth for multi-proposal vote totals and vote history.
+// Vote weights are the real on-chain `VoteCast.weight`, so Supabase never counts votes.
 //
-// Only mainnet has a subgraph; for any other chain (e.g. testnet) `getDaoSubgraphUrl`
-// returns undefined and callers fall back to direct on-chain reads.
+// `getDaoSubgraphUrl` returns undefined only when VITE_DAO_SUBGRAPH_URL is set to an
+// empty string; callers then fall back to direct on-chain reads.
 
-const MAINNET_CHAIN_ID = 3888;
-const TESTNET_CHAIN_ID = 3889;
+const DEFAULT_DAO_SUBGRAPH_URL = 'https://app.kalyswap.io/subgraphs/name/dao-subgraph-kmt';
 
 export interface SubgraphProposalNode {
 	id: string;
@@ -23,7 +22,7 @@ export interface SubgraphProposalNode {
 
 export interface ProposalTotals {
 	proposalId: string;
-	/** Raw 18-decimal gKLC wei */
+	/** Raw 18-decimal gKMT wei */
 	forVotes: bigint;
 	againstVotes: bigint;
 	abstainVotes: bigint;
@@ -369,16 +368,15 @@ export async function queryGovernor(
 }
 
 /**
- * Public query URL for the DAO subgraph on a given chain, or undefined if none is
- * configured. Env-driven (no hardcoded URLs); set VITE_DAO_SUBGRAPH_URL_MAINNET.
+ * Public query URL for the DAO subgraph (ONE chain). `VITE_DAO_SUBGRAPH_URL` overrides the
+ * default; setting it to an empty string disables the subgraph (on-chain fallback).
  */
-export function getDaoSubgraphUrl(chainId: number): string | undefined {
-	const env = (import.meta.env ?? {}) as Record<string, string | undefined>;
-	if (chainId === MAINNET_CHAIN_ID) {
-		return env.VITE_DAO_SUBGRAPH_URL_MAINNET || env.VITE_DAO_SUBGRAPH_URL || undefined;
-	}
-	if (chainId === TESTNET_CHAIN_ID) {
-		return env.VITE_DAO_SUBGRAPH_URL_TESTNET || undefined;
-	}
-	return undefined;
+export function getDaoSubgraphUrl(): string | undefined {
+	// Read ONLY the specific var, as a plain static property access. Referencing the
+	// whole import.meta.env object (or even `import.meta.env?.X`) makes Vite inline
+	// EVERY env var into the bundle — which is how a server-side secret once ended up
+	// in dist/. Keep this a bare `import.meta.env.VITE_*` expression.
+	const configured = import.meta.env.VITE_DAO_SUBGRAPH_URL as string | undefined;
+	if (configured === '') return undefined;
+	return configured || DEFAULT_DAO_SUBGRAPH_URL;
 }

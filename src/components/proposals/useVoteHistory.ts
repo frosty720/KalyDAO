@@ -44,7 +44,7 @@ export function useVoteHistory(
 			setIsLoading(true);
 			try {
 				// Mainnet: one subgraph query.
-				const subgraphUrl = getDaoSubgraphUrl(chainId);
+				const subgraphUrl = getDaoSubgraphUrl();
 				if (subgraphUrl) {
 					const history = await queryVoteHistory(subgraphUrl, proposalId);
 					if (!cancelled) setVotes(history);

@@ -30,8 +30,8 @@ const Header = () => {
       icon: <Vote className="h-4 w-4 mr-2" />,
     },
     {
-      name: "Wrap KLC",
-      path: "/wrap-klc",
+      name: "Wrap KMT",
+      path: "/wrap-kmt",
       icon: <Wallet className="h-4 w-4 mr-2" />,
     },
   ];

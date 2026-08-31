@@ -43,17 +43,17 @@ const Home = () => {
             {[
               {
                 step: 1,
-                title: "Wrap KLC → gKLC",
+                title: "Wrap KMT → gKMT",
                 description:
-                  "Deposit native KLC to receive gKLC, the governance token, at a 1:1 ratio.",
-                to: "/wrap-klc",
-                cta: "Wrap KLC",
+                  "Deposit native KMT to receive gKMT, the governance token, at a 1:1 ratio.",
+                to: "/wrap-kmt",
+                cta: "Wrap KMT",
               },
               {
                 step: 2,
                 title: "Delegate voting power",
                 description:
-                  "gKLC gives you 0 voting power until you delegate — delegate to yourself to activate it.",
+                  "gKMT gives you 0 voting power until you delegate — delegate to yourself to activate it.",
                 to: "/delegation",
                 cta: "Delegate",
               },
@@ -108,7 +108,7 @@ const Home = () => {
           </h2>
           <p className="text-muted-foreground max-w-2xl mx-auto mb-6">
             Connect your wallet to start voting on proposals or create your own.
-            Your KLC tokens represent your voting power in the DAO.
+            Your KMT tokens represent your voting power in the DAO.
           </p>
           <div className="flex flex-wrap justify-center gap-4">
             <WalletButton />

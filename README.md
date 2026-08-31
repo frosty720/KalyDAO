@@ -15,7 +15,7 @@ KalyChain DAO is a decentralized governance application built on the KalyChain b
 - **Voting System**: Vote on active proposals with FOR, AGAINST, or ABSTAIN options
 - **Delegation**: Delegate your voting power to trusted representatives
 - **Treasury Management**: Control treasury funds through governance decisions
-- **KLC Wrapping**: Wrap native KLC to governance tokens (gKLC) for participation
+- **KMT Wrapping**: Wrap native KMT to governance tokens (gKMT) for participation
 - **Vote History**: Track voting history for transparency and accountability
 - **Markdown Support**: Rich text formatting for proposal descriptions
 
@@ -23,7 +23,7 @@ KalyChain DAO is a decentralized governance application built on the KalyChain b
 
 - **Frontend**: React, TypeScript, Vite
 - **Styling**: Tailwind CSS, shadcn/ui components
-- **Blockchain Interaction**: wagmi, viem, RainbowKit
+- **Blockchain Interaction**: wagmi, viem, thirdweb in-app wallet (ONE chain: KalyChain 3890)
 - **Data Storage**: Supabase (PostgreSQL)
 - **Routing**: React Router
 - **State Management**: React hooks and context
@@ -52,7 +52,7 @@ KalyChain DAO is a decentralized governance application built on the KalyChain b
 
 3. Configure environment variables
    ```bash
-   cp .env.example .env
+   cp .env.example .env   # see .env.example — VITE_RPC_URL / VITE_EXPLORER_URL switch hosts on cut day
    ```
    Edit the `.env` file with your specific configuration
 
@@ -118,7 +118,7 @@ Create, browse, and vote on proposals that affect the KalyChain ecosystem. Each 
 ### Treasury Management
 
 The DAO controls a Treasury Vault that can:
-- Send and receive native KLC
+- Send and receive native KMT
 - Manage ERC20 tokens
 - Execute contract calls through governance
 - Implement timelock security for sensitive operations
@@ -130,12 +130,12 @@ Delegate your voting power to trusted community members to:
 - Allow technical experts to represent your interests
 - Easily manage and track your delegations
 
-### KLC Wrapping
+### KMT Wrapping
 
-Convert between native KLC and governance KLC (gKLC) tokens:
+Convert between native KMT and governance KMT (gKMT) tokens:
 - 1:1 conversion ratio
 - Required for governance participation
-- Unwrap at any time to reclaim native KLC
+- Unwrap at any time to reclaim native KMT
 
 ## Contributing
 

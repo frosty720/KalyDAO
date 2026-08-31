@@ -7,14 +7,14 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Loader2, AlertCircle, ArrowRight, History, RefreshCw, Users, TrendingUp, Shield, Vote, HelpCircle, CheckCircle2 } from 'lucide-react';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
 import { type Abi, type Chain } from 'viem';
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
 import { useBlockWatcher } from '@/components/BlockWatcher';
 import { supabase } from '@/lib/supabase';
-import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
+import { kalychain, explorerTx } from '@/blockchain/config/chains';
 import { toast } from '@/components/ui/use-toast';
 
 // Import your ABIs
@@ -82,9 +82,7 @@ export function DelegationManager() {
   const [processedHash, setProcessedHash] = useState<string | null>(null);
 
   // Get the governance token contract address based on network
-  const governanceTokenAddress = chainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
+  const governanceTokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN;
 
   // Get current delegate
   const { data: currentDelegate, refetch: refetchDelegate } = useReadContract({
@@ -127,7 +125,7 @@ export function DelegationManager() {
         .from('delegation_history')
         .select('*')
         .or(`delegator_address.eq.${address.toLowerCase()},to_delegate.eq.${address.toLowerCase()}`)
-        .eq('network_id', chainId)
+        .eq('network_id', kalychain.id)
         .order('timestamp', { ascending: false })
         .limit(50);
 
@@ -303,7 +301,7 @@ export function DelegationManager() {
       to_delegate: delegatee.toLowerCase(),
       transaction_hash: hash,
       block_number: Number(receipt.blockNumber),
-      network_id: chainId,
+      network_id: kalychain.id,
       voting_power: formatEther(currentVotingPowerValue as bigint),
       timestamp: new Date().toISOString()
     };
@@ -494,7 +492,7 @@ export function DelegationManager() {
         abi: delegationABI,
         functionName: 'delegate',
         args: [targetDelegate as `0x${string}`],
-        chain: chainId === 3889 ? kalyChainTestnet as Chain : kalyChainMainnet as Chain,
+        chain: kalychain as Chain,
         account: address as `0x${string}`,
         ...gasConfig
       });
@@ -562,7 +560,7 @@ export function DelegationManager() {
                 <div className="p-4 border rounded-lg">
                   <div className="text-sm text-muted-foreground">Token Balance</div>
                   <div className="text-2xl font-bold">
-                    {tokenBalance ? formatEther(tokenBalance as bigint) : '0'} gKLC
+                    {tokenBalance ? formatEther(tokenBalance as bigint) : '0'} gKMT
                   </div>
                 </div>
                 <div className="p-4 border rounded-lg">
@@ -871,7 +869,7 @@ export function DelegationManager() {
                       </div>
                       <div className="text-sm">
                         <a
-                          href={`https://kalyscan.io/tx/${event.transactionHash}`}
+                          href={explorerTx(event.transactionHash)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="text-primary hover:underline"
