@@ -2,9 +2,9 @@
 //
 // The OZ Governor counts a vote with getPastVotes(voter, proposalSnapshot) — the
 // wallet's DELEGATED power at the snapshot block — never its live balance. The UI
-// previously displayed/gated on the live gKLC balance, which let wallets that
+// previously displayed/gated on the live governance-token balance, which let wallets that
 // wrapped or delegated AFTER the snapshot cast recorded-but-zero-weight votes
-// (July 2026 mainnet incident: three wallets, 126M gKLC, all counted 0).
+// (July 2026 incident on the old chain: three wallets, 126M governance tokens, all counted 0).
 // This module resolves the number the Governor will actually use, plus a flag for
 // the "acquired after snapshot" case so the UI can explain it instead of lying.
 

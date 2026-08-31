@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/select";
 import { supabase } from "@/lib/supabase";
 import { useToast } from "@/components/ui/use-toast";
-import { useChainId, useAccount, useBlockNumber } from "wagmi";
+import { useBlockNumber } from "wagmi";
+import { kalychain } from "@/blockchain/config/chains";
 import { isSpecialProposal } from "@/lib/proposalVotes";
 import { getDaoSubgraphUrl, queryProposalTotals } from "@/lib/daoSubgraph";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -102,10 +103,8 @@ const ProposalsList = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
-  const walletChainId = useChainId();
-  const { isConnected } = useAccount();
-  // Default to mainnet (3888) when no wallet is connected.
-  const chainId = isConnected ? walletChainId : 3888;
+  // ONE chain: proposals are stored and read for KalyChain 3890 regardless of the wallet.
+  const chainId = kalychain.id;
   const { data: currentBlockData } = useBlockNumber({ chainId, watch: true });
   const currentBlock = Number(currentBlockData || 0);
 
@@ -138,7 +137,7 @@ const ProposalsList = ({
 
         // Overlay accurate vote totals from the DAO subgraph (on-chain truth). Testnet
         // (no subgraph) keeps Supabase; special P1/P2 keep their injected values.
-        const subUrl = getDaoSubgraphUrl(chainId);
+        const subUrl = getDaoSubgraphUrl();
         const totalsMap = new Map<string, { for: number; against: number; abstain: number }>();
         if (subUrl) {
           const totals = await queryProposalTotals(subUrl);

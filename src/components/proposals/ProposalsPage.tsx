@@ -1,4 +1,5 @@
 import React from "react";
+import { Link } from "react-router-dom";
 import ProposalsList from "./ProposalsList";
 
 const ProposalsPage = () => {
@@ -10,7 +11,11 @@ const ProposalsPage = () => {
         </h1>
         <p className="text-muted-foreground mt-2">
           Browse, filter, and vote on governance proposals for the KalyChain
-          DAO.
+          DAO. Proposals from before the KMT relaunch are preserved in the{" "}
+          <Link to="/archive" className="text-primary hover:underline">
+            Governance Archive
+          </Link>
+          .
         </p>
       </div>
       <ProposalsList />

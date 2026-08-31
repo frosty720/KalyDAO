@@ -17,7 +17,7 @@ import {
   useBlockNumber
 } from "wagmi";
 import { formatUnits, formatEther, parseEther } from "viem";
-import { CONTRACT_ADDRESSES_BY_NETWORK } from "@/blockchain/contracts/addresses";
+import { CONTRACT_ADDRESSES } from "@/blockchain/contracts/addresses";
 import { supabase } from "@/lib/supabase";
 import { useQuery } from "@tanstack/react-query";
 import { getDaoSubgraphUrl, queryGovernor } from "@/lib/daoSubgraph";
@@ -131,7 +131,7 @@ interface DaoOverviewProps {
 
 const DaoOverview = ({
   title = "KalyChain DAO Governance",
-  description = "KalyChain DAO is a decentralized autonomous organization built on the KalyChain blockchain. Members can propose, discuss, and vote on important decisions affecting the protocol using gKLC tokens as voting power.",
+  description = "KalyChain DAO is a decentralized autonomous organization built on the KalyChain blockchain. Members can propose, discuss, and vote on important decisions affecting the protocol using gKMT tokens as voting power.",
 }: DaoOverviewProps) => {
   const [statistics, setStatistics] = useState({
     totalSupply: 0,
@@ -151,17 +151,9 @@ const DaoOverview = ({
   const { data: blockNumber } = useBlockNumber({ watch: true });
 
   // Get the correct contract addresses based on current network
-  const governorAddress = (chainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT) as `0x${string}`;
-
-  const tokenAddress = (chainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN) as `0x${string}`;
-
-  const treasuryAddress = (chainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.TREASURY_VAULT
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.TREASURY_VAULT) as `0x${string}`;
+  const governorAddress = CONTRACT_ADDRESSES.GOVERNOR_CONTRACT as `0x${string}`;
+  const tokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN as `0x${string}`;
+  const treasuryAddress = CONTRACT_ADDRESSES.TREASURY as `0x${string}`;
 
   // Function to fetch all data
   const fetchSupabaseProposals = useCallback(async () => {
@@ -186,7 +178,7 @@ const DaoOverview = ({
   // Quorum config from the DAO subgraph (chain truth) on mainnet — replaces the
   // quorumNumerator / quorumVotes / quorum(block) RPC reads. Testnet has no subgraph,
   // so the on-chain reads below stay enabled there.
-  const daoSubgraphUrl = getDaoSubgraphUrl(chainId);
+  const daoSubgraphUrl = getDaoSubgraphUrl();
   const hasDaoSubgraph = !!daoSubgraphUrl;
   const { data: sgGovernor } = useQuery({
     queryKey: ['daoGovernor', chainId],
@@ -235,13 +227,6 @@ const DaoOverview = ({
     chainId,
   });
 
-  const { data: votesCount, isError: isVotesCountError } = useReadContract({
-    address: tokenAddress,
-    abi: tokenABI,
-    functionName: 'getVotesCount',
-    chainId,
-  });
-
   const { data: userTokenBalance, isError: isUserTokenBalanceError } = useReadContract({
     address: tokenAddress,
     abi: tokenABI,
@@ -281,13 +266,6 @@ const DaoOverview = ({
     refetchTreasuryBalance();
   }, [fetchSupabaseProposals, refetchTreasuryBalance]);
 
-  // Log current network
-  useEffect(() => {
-    console.log("Current chainId:", chainId);
-    console.log("Expected testnet chainId:", 3889);
-    console.log("Is on testnet:", chainId === 3889);
-  }, [chainId]);
-
   useEffect(() => {
     console.log("Contract addresses:", {
       governorAddress,
@@ -305,7 +283,6 @@ const DaoOverview = ({
       quorumVotes: quorumVotes ? formatUnits(quorumVotes, 18) : null,
       quorumNumerator: quorumNumerator?.toString(),
       quorumAtBlock: quorumAtBlock ? formatUnits(quorumAtBlock, 18) : null,
-      votesCount,
       userTokenBalance: userTokenBalance ? formatUnits(userTokenBalance, 18) : null,
       treasuryBalance: treasuryBalance ? formatUnits(treasuryBalance.value, 18) : "0",
       supabaseProposals,
@@ -314,15 +291,14 @@ const DaoOverview = ({
         quorumVotes: isQuorumVotesError ? "Error fetching quorum votes" : null,
         quorumNumerator: isQuorumNumeratorError ? "Error fetching quorum numerator" : null,
         quorumAtBlock: isQuorumAtBlockError ? "Error fetching quorum at block" : null,
-        votesCount: isVotesCountError ? "Error fetching votes count" : null,
         userTokenBalance: isUserTokenBalanceError ? "Error fetching user token balance" : null,
         treasuryBalance: isTreasuryBalanceError ? "Error fetching treasury balance" : null,
       }
     });
   }, [
-    blockNumber, lastUpdatedBlock, totalSupply, quorumVotes, quorumNumerator, quorumAtBlock, votesCount, userTokenBalance,
+    blockNumber, lastUpdatedBlock, totalSupply, quorumVotes, quorumNumerator, quorumAtBlock, userTokenBalance,
     treasuryBalance, supabaseProposals,
-    isTotalSupplyError, isQuorumVotesError, isQuorumNumeratorError, isQuorumAtBlockError, isVotesCountError, isUserTokenBalanceError, isTreasuryBalanceError
+    isTotalSupplyError, isQuorumVotesError, isQuorumNumeratorError, isQuorumAtBlockError, isUserTokenBalanceError, isTreasuryBalanceError
   ]);
 
   // Calculate total number of holders
@@ -356,7 +332,7 @@ const DaoOverview = ({
     
     // Next, try direct quorum values
     if (quorumVotes) {
-      console.log(`Direct quorumVotes: ${formatUnits(quorumVotes, 18)} KLC`);
+      console.log(`Direct quorumVotes: ${formatUnits(quorumVotes, 18)} KMT`);
       // Estimate percentage from quorumVotes if we have totalSupply
       if (totalSupply) {
         quorumPercentage = (Number(quorumVotes) * 100) / Number(totalSupply);
@@ -368,7 +344,7 @@ const DaoOverview = ({
     }
     
     if (quorumAtBlock) {
-      console.log(`Quorum at current block: ${formatUnits(quorumAtBlock, 18)} KLC`);
+      console.log(`Quorum at current block: ${formatUnits(quorumAtBlock, 18)} KMT`);
       // Estimate percentage from quorumAtBlock if we have totalSupply
       if (totalSupply) {
         quorumPercentage = (Number(quorumAtBlock) * 100) / Number(totalSupply);
@@ -421,12 +397,12 @@ const DaoOverview = ({
           </CardDescription>
           <div className="mt-3">
             <p className="text-sm text-gray-300 mb-2">
-              <strong>Important:</strong> To participate in governance, you need to wrap your KLC tokens to gKLC at a 1:1 ratio. 
-              Only gKLC tokens can be used for creating proposals and voting.
+              <strong>Important:</strong> To participate in governance, you need to wrap your KMT tokens to gKMT at a 1:1 ratio. 
+              Only gKMT tokens can be used for creating proposals and voting.
             </p>
-            <Link to="/wrap-klc">
+            <Link to="/wrap-kmt">
               <Button variant="outline" size="sm" className="flex items-center gap-1 mt-1">
-                Wrap KLC to gKLC 
+                Wrap KMT to gKMT 
                 <ArrowRight className="h-4 w-4" />
               </Button>
             </Link>
@@ -437,13 +413,13 @@ const DaoOverview = ({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
           <StatCard
             title="Total Token Supply"
-            value={`${statistics.totalSupply?.toLocaleString()} gKLC`}
+            value={`${statistics.totalSupply?.toLocaleString()} gKMT`}
             icon="coins"
             isLoading={isLoading}
           />
           <StatCard
             title="Treasury Balance"
-            value={`${statistics.treasuryBalance?.toLocaleString()} KLC`}
+            value={`${statistics.treasuryBalance?.toLocaleString()} KMT`}
             icon="landmark"
             isLoading={isLoading}
           />
@@ -474,7 +450,7 @@ const DaoOverview = ({
                 ) : (
                   <p className="text-xl font-bold text-foreground">
                     {statistics.quorumRequirement != null && statistics.quorumPercentage != null
-                      ? `${statistics.quorumRequirement.toLocaleString()} gKLC (${statistics.quorumPercentage}%)`
+                      ? `${statistics.quorumRequirement.toLocaleString()} gKMT (${statistics.quorumPercentage}%)`
                       : '—'}
                   </p>
                 )}
@@ -493,7 +469,7 @@ const DaoOverview = ({
             <ProcessStep
               number="01"
               title="Create Proposal"
-              description="Any member with sufficient KLC tokens can create a governance proposal."
+              description="Any member with sufficient KMT tokens can create a governance proposal."
             />
             <ProcessStep
               number="02"
@@ -503,7 +479,7 @@ const DaoOverview = ({
             <ProcessStep
               number="03"
               title="Voting Period"
-              description="Members vote using their KLC tokens, with one token equaling one vote."
+              description="Members vote using their KMT tokens, with one token equaling one vote."
             />
           </div>
         </div>

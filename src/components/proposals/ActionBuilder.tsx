@@ -5,51 +5,32 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent } from "@/components/ui/card";
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
-import { useChainId } from 'wagmi';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
+import { treasuryAbi } from '@/blockchain/contracts/treasuryAbi';
+import { kalychain, RPC_URL } from '@/blockchain/config/chains';
+import { useReadContract } from 'wagmi';
+import { toTokenAmount } from '@/lib/tokenAmount';
+
+// Minimal ERC20 ABI to read a token's decimals (audit H3 — never assume 18).
+const erc20DecimalsAbi = [
+  {
+    name: 'decimals',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+] as const;
 import { Info, HelpCircle } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 // Update action types to match all categories
-type ActionType = 'custom' | 'transfer' | 'transfer-erc20' | 'transfer-erc20-batch' | 'governance' | 'protocol' | 'community' | 'technical';
+type ActionType = 'custom' | 'transfer' | 'transfer-erc20' | 'governance' | 'protocol' | 'community' | 'technical';
 type ParameterType = 'string' | 'number' | 'boolean';
 
-// ABI for native token transfers
-const treasuryVaultAbi = [
-  {
-    inputs: [
-      { internalType: 'address payable', name: 'recipient', type: 'address' },
-      { internalType: 'uint256', name: 'amount', type: 'uint256' },
-    ],
-    name: 'sendNativeToken',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [
-      { internalType: 'address', name: 'token', type: 'address' },
-      { internalType: 'address', name: 'recipient', type: 'address' },
-      { internalType: 'uint256', name: 'amount', type: 'uint256' },
-    ],
-    name: 'sendERC20Token',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-  {
-    inputs: [
-      { internalType: 'address', name: 'token', type: 'address' },
-      { internalType: 'address[]', name: 'recipients', type: 'address[]' },
-      { internalType: 'uint256[]', name: 'amounts', type: 'uint256[]' },
-    ],
-    name: 'batchSendERC20Token',
-    outputs: [],
-    stateMutability: 'nonpayable',
-    type: 'function',
-  },
-] as const;
+// Treasury transfers go through the relaunch Treasury (sendNative / sendERC20, onlyOwner —
+// the DAO drives it via Timelock-executed proposals). See contracts/treasuryAbi.ts.
 
 // ABI for DAO Settings contract
 const daoSettingsAbi = [
@@ -127,7 +108,7 @@ const protocolTemplates: ParameterTemplate[] = [
   {
     key: "min_proposal_threshold",
     label: "Minimum Proposal Threshold",
-    description: "Minimum amount of gKLC required to create a proposal",
+    description: "Minimum amount of gKMT required to create a proposal",
     type: "number",
     defaultValue: "100000"
   },
@@ -206,7 +187,9 @@ const technicalTemplates: ParameterTemplate[] = [
     label: "RPC Endpoint",
     description: "Default RPC endpoint URL",
     type: "string",
-    defaultValue: "https://rpc.kalychain.io"
+    // Proposers may write this value on-chain into DAOSettings — derive it from the
+    // env-driven chain config, never a hardcoded host.
+    defaultValue: RPC_URL
   },
   {
     key: "contract_upgrade_timelock",
@@ -240,19 +223,27 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
   // For ERC20 transfer actions
   const [tokenAddress, setTokenAddress] = useState<string>('');
   
-  // For batch ERC20 transfer
-  const [recipients, setRecipients] = useState<string>(''); // Comma-separated addresses
-  const [amounts, setAmounts] = useState<string>(''); // Comma-separated amounts
-  
   // For governance actions
   const [governanceFunction, setGovernanceFunction] = useState<string>('');
   
-  const chainId = useChainId();
+  const addresses = CONTRACT_ADDRESSES;
 
-  // Get contract addresses
-  const addresses = chainId === 3889 
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet;
+  // Read the ERC20 token's real decimals so transfer amounts are scaled correctly
+  // (audit H3). Enabled only for token-transfer actions with a valid token address.
+  const isErc20Action = actionType === 'transfer-erc20';
+  const isTokenAddress = /^0x[a-fA-F0-9]{40}$/.test(tokenAddress);
+  const {
+    data: tokenDecimalsRaw,
+    isLoading: isLoadingDecimals,
+    isError: isDecimalsError,
+  } = useReadContract({
+    address: isTokenAddress ? (tokenAddress as `0x${string}`) : undefined,
+    abi: erc20DecimalsAbi,
+    functionName: 'decimals',
+    chainId: kalychain.id,
+    query: { enabled: isErc20Action && isTokenAddress },
+  });
+  const tokenDecimals = tokenDecimalsRaw === undefined ? undefined : Number(tokenDecimalsRaw);
 
   // Add a new state variable for template vs custom mode
   const [useTemplate, setUseTemplate] = useState<boolean>(true);
@@ -279,68 +270,46 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
         case 'transfer':
           if (recipient && amount && /^0x[a-fA-F0-9]{40}$/.test(recipient)) {
             const calldata = encodeFunctionData({
-              abi: treasuryVaultAbi,
-              functionName: 'sendNativeToken',
+              abi: treasuryAbi,
+              functionName: 'sendNative',
               args: [recipient as `0x${string}`, parseEther(amount)],
             });
             field.onChange(calldata);
             updateActionFields(actionIndex, {
-              target: addresses.TREASURY_VAULT,
+              target: addresses.TREASURY,
               value: '0',
             });
           }
           break;
           
         case 'transfer-erc20':
-          if (tokenAddress && recipient && amount && 
-              /^0x[a-fA-F0-9]{40}$/.test(tokenAddress) && 
+          if (tokenAddress && recipient && amount &&
+              /^0x[a-fA-F0-9]{40}$/.test(tokenAddress) &&
               /^0x[a-fA-F0-9]{40}$/.test(recipient)) {
+            // Scale by the token's REAL decimals, never a hardcoded 18 (audit H3). Wait
+            // for the on-chain decimals read before encoding so we never emit a wrong
+            // amount; clear stale calldata to block submission until it resolves.
+            if (tokenDecimals === undefined) {
+              field.onChange('0x');
+              break;
+            }
             const calldata = encodeFunctionData({
-              abi: treasuryVaultAbi,
-              functionName: 'sendERC20Token',
+              abi: treasuryAbi,
+              functionName: 'sendERC20',
               args: [
-                tokenAddress as `0x${string}`, 
-                recipient as `0x${string}`, 
-                parseEther(amount)
+                tokenAddress as `0x${string}`,
+                recipient as `0x${string}`,
+                toTokenAmount(amount, tokenDecimals)
               ],
             });
             field.onChange(calldata);
             updateActionFields(actionIndex, {
-              target: addresses.TREASURY_VAULT,
+              target: addresses.TREASURY,
               value: '0',
             });
           }
           break;
           
-        case 'transfer-erc20-batch':
-          if (tokenAddress && recipients && amounts && 
-              /^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
-            // Parse comma-separated lists into arrays
-            const recipientList = recipients.split(',').map(addr => addr.trim()) as `0x${string}`[];
-            const amountList = amounts.split(',').map(amt => parseEther(amt.trim()));
-            
-            // Validate all recipients are valid addresses
-            const allRecipientsValid = recipientList.every(addr => /^0x[a-fA-F0-9]{40}$/.test(addr));
-            
-            if (allRecipientsValid && recipientList.length === amountList.length) {
-              const calldata = encodeFunctionData({
-                abi: treasuryVaultAbi,
-                functionName: 'batchSendERC20Token',
-                args: [
-                  tokenAddress as `0x${string}`,
-                  recipientList,
-                  amountList
-                ],
-              });
-              field.onChange(calldata);
-              updateActionFields(actionIndex, {
-                target: addresses.TREASURY_VAULT,
-                value: '0',
-              });
-            }
-          }
-          break;
-
         case 'governance':
           if (governanceFunction && parameterValue) {
             const calldata = encodeFunctionData({
@@ -398,7 +367,7 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
       field.onChange('0x');
     }
   }, [
-    actionType, tokenAddress, recipient, recipients, amounts, amount, parameterKey, parameterValue,
+    actionType, tokenAddress, tokenDecimals, recipient, amount, parameterKey, parameterValue,
     parameterType, governanceFunction, field, actionIndex,
     updateActionFields, addresses
   ]);
@@ -412,9 +381,8 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="custom">Custom Calldata</SelectItem>
-          <SelectItem value="transfer">Transfer KLC (Native Token)</SelectItem>
+          <SelectItem value="transfer">Transfer KMT (Native Token)</SelectItem>
           <SelectItem value="transfer-erc20">Transfer KRC20 Token</SelectItem>
-          <SelectItem value="transfer-erc20-batch">Batch Transfer KRC20 Token</SelectItem>
           <SelectItem value="governance">Governance Settings</SelectItem>
           <SelectItem value="protocol">Protocol Parameter</SelectItem>
           <SelectItem value="community">Community Parameter</SelectItem>
@@ -429,13 +397,13 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
               <Label htmlFor={`${field.name}-recipient`}>Recipient Address</Label>
               <Input
                 id={`${field.name}-recipient`}
-                placeholder="0x... address to receive KLC"
+                placeholder="0x... address to receive KMT"
                 value={recipient}
                 onChange={(e) => setRecipient(e.target.value)}
               />
             </div>
             <div>
-              <Label htmlFor={`${field.name}-amount`}>Amount (in KLC)</Label>
+              <Label htmlFor={`${field.name}-amount`}>Amount (in KMT)</Label>
               <Input
                 id={`${field.name}-amount`}
                 type="number"
@@ -486,50 +454,11 @@ export const ActionBuilder: React.FC<ActionBuilderProps> = ({ field, actionIndex
                 step="0.000000000000000001"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Enter the amount in tokens, not wei (e.g., 1000 for 1000 tokens)
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-      
-      {actionType === 'transfer-erc20-batch' && (
-        <Card className="p-4 bg-muted/40">
-          <CardContent className="space-y-3 pt-4">
-            <div>
-              <Label htmlFor={`${field.name}-token-address-batch`}>Token Contract Address</Label>
-              <Input
-                id={`${field.name}-token-address-batch`}
-                placeholder="0x... address of the KRC20 token contract"
-                value={tokenAddress}
-                onChange={(e) => setTokenAddress(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                Enter the contract address of the KRC20 token to transfer
-              </p>
-            </div>
-            <div>
-              <Label htmlFor={`${field.name}-recipients-batch`}>Recipient Addresses</Label>
-              <Input
-                id={`${field.name}-recipients-batch`}
-                placeholder="0x1234..., 0x5678..., 0x9abc..."
-                value={recipients}
-                onChange={(e) => setRecipients(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                Enter comma-separated list of recipient addresses
-              </p>
-            </div>
-            <div>
-              <Label htmlFor={`${field.name}-amounts-batch`}>Amounts (in token units)</Label>
-              <Input
-                id={`${field.name}-amounts-batch`}
-                placeholder="100, 200, 300"
-                value={amounts}
-                onChange={(e) => setAmounts(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                Enter comma-separated list of amounts (must match the number of recipients)
+                Enter the amount in whole tokens (e.g., 1000 for 1000 tokens).
+                {isTokenAddress && isLoadingDecimals && ' Reading token decimals…'}
+                {isTokenAddress && isDecimalsError &&
+                  ' ⚠ Could not read this token’s decimals — check the contract address.'}
+                {tokenDecimals !== undefined && ` Token uses ${tokenDecimals} decimals.`}
               </p>
             </div>
           </CardContent>

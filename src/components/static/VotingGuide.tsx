@@ -8,10 +8,14 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { GOVERNANCE_PARAMS, blocksToDuration } from "@/blockchain/config/chains";
 
-/** Visual timeline of a proposal's life, centered on the snapshot moment.
- *  Widths reflect mainnet's current parameters: ~7 day voting delay (get-ready
- *  window) followed by ~14 days of voting — a 1:2 ratio. */
+// Governance timing straight from the on-chain parameters (43,200 / 129,600 blocks at 2 s):
+// ~1 day get-ready window, ~3 days of voting.
+const DELAY = blocksToDuration(GOVERNANCE_PARAMS.votingDelayBlocks);
+const PERIOD = blocksToDuration(GOVERNANCE_PARAMS.votingPeriodBlocks);
+
+/** Visual timeline of a proposal's life, centered on the snapshot moment. */
 const SnapshotTimeline = () => (
   <div className="rounded-lg border border-border bg-secondary p-5 my-6">
     <div className="flex items-center gap-2 mb-5 text-sm font-semibold text-foreground">
@@ -36,7 +40,7 @@ const SnapshotTimeline = () => (
       <div className="w-1/3 pr-2">
         <div className="font-semibold text-emerald-400">Proposal submitted</div>
         <div className="text-muted-foreground mt-1">
-          Get-ready window (~7 days on mainnet): wrap KLC and delegate{" "}
+          Get-ready window (~{DELAY}): wrap KMT and delegate{" "}
           <strong className="text-foreground">now</strong> if you haven't — there is still
           time for this proposal.
         </div>
@@ -46,14 +50,14 @@ const SnapshotTimeline = () => (
           <Camera className="h-3.5 w-3.5" /> Snapshot — voting starts
         </div>
         <div className="text-muted-foreground mt-1">
-          Everyone's delegated gKLC is recorded at this block. Power gained after this
+          Everyone's delegated gKMT is recorded at this block. Power gained after this
           moment counts <strong className="text-foreground">0</strong> for this proposal.
         </div>
       </div>
       <div className="w-1/3 pl-2 text-right">
         <div className="font-semibold text-foreground">Voting ends</div>
         <div className="text-muted-foreground mt-1">
-          ~14 days of voting on mainnet. Result is final at the last block.
+          ~{PERIOD} of voting. Result is final at the last block.
         </div>
       </div>
     </div>
@@ -61,26 +65,26 @@ const SnapshotTimeline = () => (
 );
 
 /** Step-by-step guide to voting in the KalyChain DAO. Reflects the real flow:
- *  wrap KLC -> gKLC, delegate to activate voting power, then vote on a proposal. */
+ *  wrap KMT -> gKMT, delegate to activate voting power, then vote on a proposal. */
 const VotingGuide = () => (
   <StaticPage
     title="Voting Guide"
     subtitle="How to participate in KalyChain DAO governance — from getting voting power to casting your vote."
   >
-    <h2>1. Get governance tokens (gKLC)</h2>
+    <h2>1. Get governance tokens (gKMT)</h2>
     <p>
-      Voting power in the DAO comes from <strong>gKLC</strong> (Governance KLC). You get gKLC
-      by wrapping your native KLC at a 1:1 ratio — and you can unwrap back to KLC at any time.
+      Voting power in the DAO comes from <strong>gKMT</strong> (Governance KMT). You get gKMT
+      by wrapping your native KMT at a 1:1 ratio — and you can unwrap back to KMT at any time.
     </p>
     <ul>
-      <li>Open the <Link to="/wrap-klc">Wrap KLC</Link> page.</li>
-      <li>Enter the amount of KLC to wrap and confirm the transaction in your wallet.</li>
-      <li>You now hold gKLC equal to the KLC you wrapped.</li>
+      <li>Open the <Link to="/wrap-kmt">Wrap KMT</Link> page.</li>
+      <li>Enter the amount of KMT to wrap and confirm the transaction in your wallet.</li>
+      <li>You now hold gKMT equal to the KMT you wrapped.</li>
     </ul>
 
     <h2>2. Activate your voting power (delegate)</h2>
     <p>
-      Holding gKLC is not enough on its own — voting power only counts once it is{" "}
+      Holding gKMT is not enough on its own — voting power only counts once it is{" "}
       <strong>delegated</strong>. The simplest option is to delegate to yourself. You only do
       this once: delegation stays active for every future proposal automatically.
     </p>
@@ -91,7 +95,7 @@ const VotingGuide = () => (
 
     <h2>3. Understand the snapshot — when your power is counted</h2>
     <p>
-      Every proposal takes a <strong>snapshot</strong> of everyone's delegated gKLC at the
+      Every proposal takes a <strong>snapshot</strong> of everyone's delegated gKMT at the
       block where voting starts. Your vote is weighed with your power{" "}
       <em>at that exact moment</em> — not when you cast the vote. This is a core security
       feature of the governance contract (the same rule used by Uniswap, ENS, and Compound):
@@ -122,8 +126,7 @@ const VotingGuide = () => (
     <p>
       The proposal page shows <strong>your voting power for this proposal</strong> — the
       snapshot amount the contract will actually count. Make sure your wallet is connected to
-      the same network the proposal lives on (KalyChain Mainnet for live governance); the
-      page will tell you if you need to switch.
+      the KalyChain (KMT) network; the page will tell you if you need to switch.
     </p>
 
     <h2>6. What happens after voting</h2>
@@ -142,13 +145,13 @@ const VotingGuide = () => (
     <Accordion type="single" collapsible className="w-full mb-4">
       <AccordionItem value="power-zero">
         <AccordionTrigger className="text-left">
-          I hold gKLC — why does a proposal say my voting power is 0?
+          I hold gKMT — why does a proposal say my voting power is 0?
         </AccordionTrigger>
         <AccordionContent>
-          Your gKLC was wrapped or delegated <strong>after</strong> that proposal's snapshot,
+          Your gKMT was wrapped or delegated <strong>after</strong> that proposal's snapshot,
           so it cannot count there. It is not lost: your power automatically counts on every
           proposal created from now on. If you have never delegated at all, do that first on
-          the <Link to="/delegation">Delegation</Link> page — undelegated gKLC always has 0
+          the <Link to="/delegation">Delegation</Link> page — undelegated gKMT always has 0
           voting power, on every proposal.
         </AccordionContent>
       </AccordionItem>
@@ -159,7 +162,7 @@ const VotingGuide = () => (
         </AccordionTrigger>
         <AccordionContent>
           Not yet. There is a <strong>get-ready window</strong> between submission and the
-          start of voting (currently about 7 days on mainnet). If you wrap and delegate before
+          start of voting (currently about {DELAY}). If you wrap and delegate before
           voting starts, your power counts for that proposal. Once the proposal shows{" "}
           <strong>Active</strong>, the snapshot has been taken and it is too late for that one
           — but you are ready for every proposal after it.
@@ -172,14 +175,14 @@ const VotingGuide = () => (
         </AccordionTrigger>
         <AccordionContent>
           No. Delegation is one-time and stays active until you change it. Topping up your
-          gKLC later also just works — new tokens are added to your delegated power the moment
+          gKMT later also just works — new tokens are added to your delegated power the moment
           you receive them, and count on every proposal created after that.
         </AccordionContent>
       </AccordionItem>
 
       <AccordionItem value="unwrapped">
         <AccordionTrigger className="text-left">
-          I unwrapped my gKLC after a proposal's snapshot. Can I still vote on it?
+          I unwrapped my gKMT after a proposal's snapshot. Can I still vote on it?
         </AccordionTrigger>
         <AccordionContent>
           Yes. Your power at the snapshot is what counts, even if you have since moved or
@@ -190,7 +193,7 @@ const VotingGuide = () => (
 
       <AccordionItem value="more-power-mid-vote">
         <AccordionTrigger className="text-left">
-          If I wrap more gKLC while voting is open, does my vote get bigger?
+          If I wrap more gKMT while voting is open, does my vote get bigger?
         </AccordionTrigger>
         <AccordionContent>
           No — for the current proposal your weight is fixed at the snapshot amount. The extra
@@ -205,7 +208,7 @@ const VotingGuide = () => (
         </AccordionTrigger>
         <AccordionContent>
           <strong>For</strong> and <strong>Abstain</strong> votes count toward quorum;{" "}
-          <strong>Against</strong> votes do not. Quorum is a percentage of the total gKLC
+          <strong>Against</strong> votes do not. Quorum is a percentage of the total gKMT
           supply measured at the proposal's snapshot, so abstaining is still a meaningful way
           to help a proposal reach a valid result without supporting it.
         </AccordionContent>

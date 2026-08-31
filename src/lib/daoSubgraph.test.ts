@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
 	parseProposalTotals,
 	voteId,
@@ -220,8 +220,12 @@ describe('parseVoteHistory', () => {
 });
 
 describe('getDaoSubgraphUrl', () => {
-	it('returns undefined for an unconfigured chain (e.g. testnet) so callers fall back on-chain', () => {
-		// Testnet has no subgraph; env var unset in tests.
-		expect(getDaoSubgraphUrl(3889)).toBeUndefined();
+	it('defaults to the kmt DAO subgraph (ONE chain) when the env var is unset', () => {
+		expect(getDaoSubgraphUrl()).toBe('https://app.kalyswap.io/subgraphs/name/dao-subgraph-kmt');
+	});
+	it('an explicit empty VITE_DAO_SUBGRAPH_URL disables the subgraph so callers fall back on-chain', () => {
+		vi.stubEnv('VITE_DAO_SUBGRAPH_URL', '');
+		expect(getDaoSubgraphUrl()).toBeUndefined();
+		vi.unstubAllEnvs();
 	});
 });

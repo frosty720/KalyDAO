@@ -28,7 +28,7 @@ import {
   usePublicClient
 } from 'wagmi';
 import { WalletButton } from '@/components/WalletButton';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '@/blockchain/contracts/addresses';
+import { CONTRACT_ADDRESSES } from '@/blockchain/contracts/addresses';
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
@@ -58,13 +58,15 @@ import {
 import { getProposalLifecycleStep } from '@/lib/proposalLifecycle';
 import { resolveDisplayVotes, isSpecialProposal, SPECIAL_PROPOSAL_IDS } from '@/lib/proposalVotes';
 import { resolveVotingPower } from '@/lib/votingPower';
+import { resolveProposalDataSource } from '@/lib/proposalDataSource';
+import { pickProposalCreatedArgs, computeProposalId, type ProposalCreatedArgs } from '@/lib/proposalExecutionArgs';
 import { useVoteHistory } from './useVoteHistory';
 import { useDao } from '@/blockchain/hooks/useDao';
 import { ethers } from 'ethers';
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getTransactionGasConfig } from '@/blockchain/config/transaction';
-import { kalyChainMainnet, kalyChainTestnet } from '@/blockchain/config/chains';
+import { kalychain } from '@/blockchain/config/chains';
 import { CountdownTimer } from './CountdownTimer';
 import { toast } from "@/components/ui/use-toast";
 import { type Abi, type AbiEvent, decodeEventLog, parseGwei } from 'viem';
@@ -300,7 +302,7 @@ const ProposalDetail = ({
   const proposalChainId =
     ((proposalData as { chain_id?: number } | null)?.chain_id) ?? chainId;
   const isWrongNetwork = !!proposalData && chainId !== proposalChainId;
-  const currentChain = proposalChainId === 3889 ? kalyChainTestnet : kalyChainMainnet;
+  const currentChain = kalychain;
 
   const { data: txHash, error: writeError, isPending: isWritePending, writeContract } = useWriteContract();
   // Pin the receipt watcher to the PROPOSAL's chain (same as every read/write here), so
@@ -309,13 +311,8 @@ const ProposalDetail = ({
   const publicClient = usePublicClient();
 
   // Get the correct contract addresses based on the PROPOSAL's network
-  const governorAddress = proposalChainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNOR_CONTRACT
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNOR_CONTRACT;
-
-  const governanceTokenAddress = proposalChainId === 3889
-    ? CONTRACT_ADDRESSES_BY_NETWORK.testnet.GOVERNANCE_TOKEN
-    : CONTRACT_ADDRESSES_BY_NETWORK.mainnet.GOVERNANCE_TOKEN;
+  const governorAddress = CONTRACT_ADDRESSES.GOVERNOR_CONTRACT;
+  const governanceTokenAddress = CONTRACT_ADDRESSES.GOVERNANCE_TOKEN;
 
   // Current block on the PROPOSAL's chain (so countdowns/period checks use the right
   // chain, not the wallet's).
@@ -331,7 +328,7 @@ const ProposalDetail = ({
   // subgraph (deriveProposalState) for display; the on-chain `state()` read is kept
   // lazy (enabled:false on mainnet) and only refetched on demand as the queue/execute
   // gate, where an authoritative, lag-free value matters.
-  const daoSubgraphUrl = getDaoSubgraphUrl(proposalChainId);
+  const daoSubgraphUrl = getDaoSubgraphUrl();
   const hasDaoSubgraph = !!daoSubgraphUrl;
 
   const { data: sgData, refetch: refetchSubgraph } = useQuery({
@@ -348,6 +345,16 @@ const ProposalDetail = ({
   });
   const sgDetail = sgData?.detail ?? null;
 
+  // Where do votes/quorum/state/blocks/eta come from? Subgraph when it answers, else
+  // on-chain. `subgraphUnavailable` is true when the subgraph is configured but gave
+  // us nothing (down / GraphQL error / not indexed) so the on-chain reads below take
+  // over instead of leaving the page blank (audit H1).
+  const { useOnChainReads, subgraphUnavailable } = resolveProposalDataSource({
+    hasDaoSubgraph,
+    subgraphResponded: sgData !== undefined,
+    hasSubgraphDetail: !!sgDetail,
+  });
+
   const { data: deadlineOnChain } = useReadContract({
     address: governorAddress as `0x${string}`,
     abi: governorABI,
@@ -355,7 +362,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: proposerOnChain } = useReadContract({
@@ -365,7 +372,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: snapshotOnChain } = useReadContract({
@@ -375,7 +382,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   const { data: rawVotesOnChain, refetch: refetchVotesOnChain } = useReadContract({
@@ -385,7 +392,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   // On-chain state(). On mainnet this NEVER auto-fires (enabled:false) — display state
@@ -398,7 +405,7 @@ const ProposalDetail = ({
     args: [safeProposalId ?? 0n],
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph },
+    query: { enabled: useOnChainReads },
   });
 
   // Read proposalEta (timestamp when it can be executed) — testnet fallback only.
@@ -410,7 +417,7 @@ const ProposalDetail = ({
      chainId: proposalChainId,
      account: address,
      query: {
-       enabled: !hasDaoSubgraph && !!id && Number(stateOnChain) === 5,
+       enabled: useOnChainReads && !!id && Number(stateOnChain) === 5,
      }
   });
 
@@ -422,7 +429,7 @@ const ProposalDetail = ({
     args: snapshotOnChain ? [BigInt(snapshotOnChain)] : undefined,
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph && !!snapshotOnChain },
+    query: { enabled: useOnChainReads && !!snapshotOnChain },
   });
 
   // On-chain "has this wallet already voted?" — testnet fallback only.
@@ -433,32 +440,34 @@ const ProposalDetail = ({
     args: safeProposalId != null && address ? [safeProposalId, address] : undefined,
     chainId: proposalChainId,
     account: address,
-    query: { enabled: !hasDaoSubgraph && !!id && !!address },
+    query: { enabled: useOnChainReads && !!id && !!address },
   });
 
-  // ── Merged values: subgraph on mainnet, on-chain reads on testnet ───────────
+  // ── Merged values: subgraph when it answers, on-chain otherwise ─────────────
   // Downstream code uses these names unchanged (deadline/snapshot/rawVotes/state/…).
-  const deadline = hasDaoSubgraph ? sgDetail?.voteEnd : deadlineOnChain;
-  const proposer = hasDaoSubgraph ? sgDetail?.proposer : proposerOnChain;
-  const snapshot = hasDaoSubgraph ? sgDetail?.voteStart : snapshotOnChain;
+  // `useOnChainReads` is true on testnet AND when the mainnet subgraph is unavailable,
+  // so a subgraph outage transparently falls back to the chain instead of blanking.
+  const deadline = useOnChainReads ? deadlineOnChain : sgDetail?.voteEnd;
+  const proposer = useOnChainReads ? proposerOnChain : sgDetail?.proposer;
+  const snapshot = useOnChainReads ? snapshotOnChain : sgDetail?.voteStart;
   // Memoized: this array is a dependency of the data-fetch effect below, so a fresh
   // reference each render would loop it forever (isLoading never settles).
   const rawVotes = useMemo(
     () =>
-      (hasDaoSubgraph
-        ? sgDetail
+      (useOnChainReads
+        ? rawVotesOnChain
+        : sgDetail
           ? [sgDetail.againstVotes, sgDetail.forVotes, sgDetail.abstainVotes]
-          : undefined
-        : rawVotesOnChain) as readonly [bigint, bigint, bigint] | undefined,
-    [hasDaoSubgraph, sgDetail, rawVotesOnChain],
+          : undefined) as readonly [bigint, bigint, bigint] | undefined,
+    [useOnChainReads, sgDetail, rawVotesOnChain],
   );
-  const quorumRaw = hasDaoSubgraph ? sgDetail?.quorumVotes : quorumRawOnChain;
-  const proposalEta = hasDaoSubgraph ? (sgDetail?.eta ?? undefined) : proposalEtaOnChain;
-  const onChainHasVoted = hasDaoSubgraph ? !!sgData?.voted : hasVotedOnChain;
-  // Live state: derived from the subgraph + current block on mainnet; on-chain on testnet.
-  const state = hasDaoSubgraph
-    ? (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined)
-    : stateOnChain;
+  const quorumRaw = useOnChainReads ? quorumRawOnChain : sgDetail?.quorumVotes;
+  const proposalEta = useOnChainReads ? proposalEtaOnChain : (sgDetail?.eta ?? undefined);
+  const onChainHasVoted = useOnChainReads ? hasVotedOnChain : !!sgData?.voted;
+  // Live state: on-chain state() in fallback/testnet; derived from subgraph + block otherwise.
+  const state = useOnChainReads
+    ? stateOnChain
+    : (sgDetail && currentBlock ? deriveProposalState(sgDetail, BigInt(currentBlock)) : undefined);
 
   // ── Voting power the Governor will ACTUALLY count ───────────────────────────
   // castVote weighs a vote with getPastVotes(voter, snapshot) — delegated power at
@@ -482,7 +491,7 @@ const ProposalDetail = ({
   });
 
   // Live delegated power — used as the estimate while a proposal is Pending and to
-  // detect the "you got gKLC after the snapshot" case for the explainer message.
+  // detect the "you got gKMT after the snapshot" case for the explainer message.
   const { data: currentPowerWei } = useReadContract({
     address: governanceTokenAddress as `0x${string}`,
     abi: governanceTokenABI,
@@ -492,17 +501,17 @@ const ProposalDetail = ({
     query: { enabled: !!address },
   });
 
-  // One refresh entry point: poke the subgraph on mainnet, the on-chain reads on testnet.
+  // One refresh entry point: always poke the subgraph (so an outage can recover), and
+  // refresh the on-chain reads whenever they're the active source (testnet or fallback).
   const refreshProposalData = useCallback(() => {
-    if (hasDaoSubgraph) {
-      void refetchSubgraph();
-      return;
+    if (hasDaoSubgraph) void refetchSubgraph();
+    if (useOnChainReads) {
+      void refetchStateOnChain?.();
+      void refetchVotesOnChain?.();
+      void refetchEtaOnChain?.();
+      if (address) void refetchHasVotedOnChain?.();
     }
-    void refetchStateOnChain?.();
-    void refetchVotesOnChain?.();
-    void refetchEtaOnChain?.();
-    if (address) void refetchHasVotedOnChain?.();
-  }, [hasDaoSubgraph, refetchSubgraph, refetchStateOnChain, refetchVotesOnChain, refetchEtaOnChain, refetchHasVotedOnChain, address]);
+  }, [hasDaoSubgraph, useOnChainReads, refetchSubgraph, refetchStateOnChain, refetchVotesOnChain, refetchEtaOnChain, refetchHasVotedOnChain, address]);
 
   // Vote history from on-chain VoteCast truth (subgraph on mainnet, logs on testnet).
   // Never reads Supabase, so reverted/ghost votes can never appear here.
@@ -521,10 +530,10 @@ const ProposalDetail = ({
   // useBlockNumber({ watch: true }); the refetch fns from wagmi are stable.
   useEffect(() => {
     if (!currentBlock || !id) return;
-    // On mainnet the subgraph self-polls (refetchInterval) and state is derived from
-    // the advancing block — so there is NO per-block RPC. Only the testnet fallback
-    // re-reads on-chain here.
-    if (hasDaoSubgraph) return;
+    // When the subgraph is the source it self-polls (refetchInterval) and state is
+    // derived from the advancing block — so no per-block RPC. Re-read on-chain per block
+    // only when on-chain reads are the active source (testnet, or a mainnet subgraph outage).
+    if (!useOnChainReads) return;
     // Stop polling once the proposal is in a terminal state (Canceled/Defeated/
     // Executed) — those never change, so per-block refetching is pure waste.
     const terminal = [2, 3, 7].includes(Number(state));
@@ -541,7 +550,7 @@ const ProposalDetail = ({
   useEffect(() => {
     if (!id) return;
     supabase
-      .rpc('increment_proposal_views', { proposal_id_param: id })
+      .rpc('increment_proposal_views', { p_proposal_id: id })
       .then(undefined, (e: unknown) => console.warn('Failed to increment views:', e));
   }, [id]);
 
@@ -826,7 +835,7 @@ const ProposalDetail = ({
   };
 
   // Power the Governor will count for THIS proposal (snapshot-based), plus the flag
-  // for "wallet has gKLC now but had none at the snapshot" so the UI can explain
+  // for "wallet has gKMT now but had none at the snapshot" so the UI can explain
   // why voting is unavailable instead of showing a number the contract won't honor.
   const { effectivePowerWei, acquiredAfterSnapshot } = resolveVotingPower({
     snapshotPowerWei: snapshotPowerWei as bigint | undefined,
@@ -867,7 +876,11 @@ const ProposalDetail = ({
 
   // Handle vote
   const handleVote = async (direction: "for" | "against" | "abstain") => {
-    setUserVote(direction);
+    // Record the intended direction (drives the confirm dialog + the tx), but do NOT
+    // mark the user as "voted" here (audit H4). Setting userVote on click meant that
+    // cancelling the dialog — or hitting the not-delegated guard below — permanently
+    // locked the user out of voting for the session. `userVote` is set ONLY from a
+    // successful on-chain receipt (see the vote-confirmation effect).
     setVoteDirection(direction);
     console.log(`handleVote called with direction: ${direction}`);
     console.log(`Current isDelegated state: ${isDelegated}`);
@@ -1102,6 +1115,81 @@ const ProposalDetail = ({
   }, [txHash]); // Dependency on txHash
 
   // Regular functions that we're keeping
+  // Reconstruct queue()/execute() args from the on-chain ProposalCreated event — the
+  // immutable source of truth — instead of the anon-writable Supabase copy (audit H2).
+  // The Governor recomputes proposalId from these four inputs; a byte of drift reverts
+  // as "unknown proposal id". We find this proposal's creation event, hash its ACTUAL
+  // on-chain description, and verify hashProposal() reconstructs this exact id before
+  // returning — so an edited/absent DB row can no longer brick a passed proposal, and
+  // we never send a transaction that is guaranteed to revert.
+  const getOnChainExecutionArgs = async (): Promise<{
+    targets: `0x${string}`[];
+    values: bigint[];
+    calldatas: `0x${string}`[];
+    descriptionHash: `0x${string}`;
+  }> => {
+    if (!publicClient) throw new Error('No RPC client available for this network.');
+    if (safeProposalId == null) throw new Error('Invalid proposal id.');
+    if (snapshot === undefined || snapshot === null) {
+      throw new Error('Proposal data is still loading — please try again in a moment.');
+    }
+
+    // ProposalCreated has no indexed proposalId, so scan a bounded window ending at the
+    // snapshot block (creation is always <= snapshot) and match by decoded id.
+    const snap = BigInt(snapshot as bigint);
+    const SPAN = 400_000n;  // > votingDelay (43,200 on 3890) with wide margin
+    const CHUNK = 45_000n;  // matches the getLogs range used elsewhere in this app
+    const startBlock = snap > SPAN ? snap - SPAN : 0n;
+
+    const ranges: Array<[bigint, bigint]> = [];
+    for (let from = startBlock; from <= snap; from += CHUNK + 1n) {
+      const to = from + CHUNK < snap ? from + CHUNK : snap;
+      ranges.push([from, to]);
+    }
+
+    const logChunks = await Promise.all(
+      ranges.map(([fromBlock, toBlock]) =>
+        publicClient
+          .getLogs({
+            address: governorAddress as `0x${string}`,
+            event: proposalCreatedEventAbi,
+            fromBlock,
+            toBlock,
+          })
+          .catch(() => [] as unknown[]),
+      ),
+    );
+    const logs = logChunks.flat() as Array<{ args?: ProposalCreatedArgs }>;
+
+    const args = pickProposalCreatedArgs(logs, safeProposalId);
+    if (!args) {
+      throw new Error(
+        "Couldn't find this proposal's creation event on-chain, so its execution data can't be verified. It cannot be queued or executed from this UI.",
+      );
+    }
+
+    // Verify the reconstructed call hashes back to THIS proposal id (same formula the
+    // Governor uses) before sending anything — locally, so a malicious RPC can't spoof
+    // the check. A mismatch means the event data is unusable; refuse rather than revert.
+    if (computeProposalId(args) !== safeProposalId) {
+      throw new Error(
+        'On-chain proposal data did not reconstruct this proposal id — refusing to send a transaction that would revert.',
+      );
+    }
+
+    // Hash the ACTUAL on-chain description (not the Supabase copy) for the tx args.
+    const descriptionHash = ethers.utils.keccak256(
+      ethers.utils.toUtf8Bytes(args.description),
+    ) as `0x${string}`;
+
+    return {
+      targets: args.targets,
+      values: args.values,
+      calldatas: args.calldatas,
+      descriptionHash,
+    };
+  };
+
   const handleQueue = async () => {
     if (!writeContract || !id || !governorAddress || !address) {
       console.error('Missing required data for queue', { writeContract, id, governorAddress });
@@ -1115,42 +1203,9 @@ const ProposalDetail = ({
     try {
       console.log('Queueing proposal', id);
 
-      // Get parameters from proposalData and convert to the correct types
-      const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
-      const values = (proposalData?.values || []).map(v => BigInt(v));
-      const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
-
-      // Preflight: a proposal with missing/mismatched execution data would revert
-      // with a cryptic "unknown proposal id". Fail clearly instead.
-      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
-        lastActionRef.current = null;
-        setIsQueueing(false);
-        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be queued.');
-        toast({
-          title: 'Cannot queue',
-          description: 'This proposal is missing its on-chain execution data.',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      // Get the ORIGINAL full description text (not the hash)
-      const descriptionText = proposalData?.full_description ||
-        `${proposalData?.title}\n\n${proposalData?.description}`;
-
-      // Calculate the keccak256 hash of the description using ethers
-      // This is what the contract uses internally for hashProposal
-      const descriptionHash = ethers.utils.keccak256(
-        ethers.utils.toUtf8Bytes(descriptionText)
-      ) as `0x${string}`;
-
-      console.log('Queue parameters:', {
-        targets,
-        values,
-        calldatas,
-        descriptionHash,
-        descriptionText: descriptionText.substring(0, 100) + '...' // Log part of the text
-      });
+      // Reconstruct + verify the four call args from the on-chain ProposalCreated event.
+      // Throws (→ catch) with a clear message if the proposal can't be verified.
+      const { targets, values, calldatas, descriptionHash } = await getOnChainExecutionArgs();
 
       // Get transaction gas config from the shared utility
       const gasConfig = getTransactionGasConfig();
@@ -1164,7 +1219,11 @@ const ProposalDetail = ({
         args: [targets, values, calldatas, descriptionHash],
         chain: currentChain,
         account: address,
-        ...gasConfig
+        ...gasConfig,
+        // queue() hashes and stores every action in the Timelock, so a multi-action
+        // proposal can exceed the ~300k default. Match propose()'s headroom
+        // (unused gas is refunded).
+        gas: 1_500_000n,
       });
 
       console.log('Queue transaction initiated');
@@ -1185,6 +1244,8 @@ const ProposalDetail = ({
         description: error?.message || 'An error occurred while queueing the proposal',
         variant: 'destructive',
       });
+      // No tx was sent — clear the action ref so a later write can't inherit it.
+      lastActionRef.current = null;
       setIsQueueing(false);
     }
   };
@@ -1220,41 +1281,9 @@ const ProposalDetail = ({
 
       console.log('Executing proposal', id);
 
-      // Get parameters from proposalData and convert to the correct types
-      const targets = (proposalData?.targets || []).map(t => t as `0x${string}`);
-      const values = (proposalData?.values || []).map(v => BigInt(v));
-      const calldatas = (proposalData?.calldatas || []).map(c => c as `0x${string}`);
-
-      // Preflight (same as queue): missing/mismatched execution data → clear error.
-      if (targets.length === 0 || targets.length !== values.length || targets.length !== calldatas.length) {
-        lastActionRef.current = null;
-        setIsExecuting(false);
-        setQueueExecuteError('This proposal is missing its on-chain execution data and cannot be executed.');
-        toast({
-          title: 'Cannot execute',
-          description: 'This proposal is missing its on-chain execution data.',
-          variant: 'destructive',
-        });
-        return;
-      }
-
-      // Get the ORIGINAL full description text (not the hash)
-      const descriptionText = proposalData?.full_description ||
-        `${proposalData?.title}\n\n${proposalData?.description}`;
-
-      // Calculate the keccak256 hash of the description using ethers
-      // This is what the contract uses internally for hashProposal
-      const descriptionHash = ethers.utils.keccak256(
-        ethers.utils.toUtf8Bytes(descriptionText)
-      ) as `0x${string}`;
-
-      console.log('Execute parameters:', {
-        targets,
-        values,
-        calldatas,
-        descriptionHash: descriptionHash,
-        descriptionText: descriptionText.substring(0, 100) + '...' // Log part of the text
-      });
+      // Reconstruct + verify the four call args from the on-chain ProposalCreated event
+      // (same source of truth as queue). Throws (→ catch) if it can't be verified.
+      const { targets, values, calldatas, descriptionHash } = await getOnChainExecutionArgs();
 
       // Get transaction gas config from the shared utility
       const gasConfig = getTransactionGasConfig();
@@ -1294,27 +1323,45 @@ const ProposalDetail = ({
         description: error?.message || 'An error occurred while executing the proposal',
         variant: 'destructive',
       });
+      // No tx was sent — clear the action ref so a later write can't inherit it.
+      lastActionRef.current = null;
       setIsExecuting(false);
     }
   };
 
   // Vote confirmation handler.
   //
-  // IMPORTANT: only act on a SUCCESSFUL receipt. `useWaitForTransactionReceipt`
-  // also resolves for REVERTED txs (e.g. "already voted") — recording those was
-  // the source of the "ghost votes". We no longer write votes to Supabase at all:
-  // the vote totals and Vote History are read from on-chain `VoteCast` (subgraph
-  // on mainnet, logs on testnet), so ghosts are structurally impossible. We only
-  // update local UI state and re-read the chain.
+  // `useWaitForTransactionReceipt` resolves for BOTH successful AND reverted txs, so we
+  // must handle each. Vote totals / Vote History are read from on-chain `VoteCast`
+  // (subgraph on mainnet, logs on testnet) — never Supabase — so a revert can't create
+  // a ghost vote; we only update local UI state here.
   useEffect(() => {
-    // Only react to a VOTE tx — the shared write hook is also used by queue/execute,
-    // and reacting to those here is what created phantom ABSTAIN rows from queue txs.
-    if (receipt && txHash && receipt.status === 'success' && lastActionRef.current === 'vote') {
+    // Only react to a VOTE tx — the shared write hook is also used by queue/execute
+    // (those are handled by the queueExecuteHash effect above). The lastActionRef guard
+    // keeps this branch from touching their receipts.
+    if (!receipt || !txHash || lastActionRef.current !== 'vote') return;
+
+    if (receipt.status === 'success') {
       lastActionRef.current = null;
       setIsSubmitting(false);
       setUserVote(voteDirection);
       refreshProposalData(); // subgraph (mainnet) / on-chain (testnet): updates votes + has-voted
       setRefetchKey(prev => prev + 1); // refresh on-chain vote history
+    } else {
+      // Mined but REVERTED (already voted, proposal no longer Active, 0 snapshot power…).
+      // Clear the in-flight state so the user isn't stuck on "Processing…", and do NOT
+      // mark them as voted. Clearing lastActionRef here is what prevents a LATER write on
+      // the shared writeContract (e.g. a delegate tx) from being mistaken for this vote
+      // and falsely recording a vote (audit H5).
+      lastActionRef.current = null;
+      setIsSubmitting(false);
+      setVoteStatus(null);
+      toast({
+        title: 'Vote failed',
+        description:
+          'Your vote was reverted on-chain — you may have already voted, or the proposal is no longer accepting votes.',
+        variant: 'destructive',
+      });
     }
   }, [receipt, txHash, voteDirection]);
 
@@ -1446,6 +1493,20 @@ const ProposalDetail = ({
         </div>
         <p className="text-muted-foreground mt-2">{proposalData?.description}</p>
       </div>
+
+      {/* Subgraph outage: we've transparently fallen back to on-chain reads, but tell
+          the user why data may load a little slower than usual (audit H1). */}
+      {subgraphUnavailable && (
+        <Alert className="mb-6 border-amber-500/40 bg-amber-500/10">
+          <AlertCircle className="h-4 w-4 text-amber-400" />
+          <AlertTitle className="text-amber-300">Live indexer unavailable</AlertTitle>
+          <AlertDescription className="text-muted-foreground">
+            The DAO indexer isn't responding right now, so vote totals, quorum and status
+            are being read directly from the blockchain. Everything still works — voting,
+            queueing and execution are unaffected — it may just refresh a little slower.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Lifecycle / next-step panel: surfaces queue/execute actions after a vote */}
       {state !== undefined && ![0, 1].includes(Number(state)) && (() => {
@@ -1737,14 +1798,14 @@ const ProposalDetail = ({
                 <div className="bg-secondary p-4 rounded-md">
                   <p className="text-sm text-muted-foreground">
                     {isWrongNetwork ?
-                      `This proposal is on KalyChain ${proposalChainId === 3889 ? 'Testnet' : 'Mainnet'}. Switch your wallet to that network to vote.` :
+                      `This proposal is on ${kalychain.name} (chain ${proposalChainId}). Switch your wallet to that network to vote.` :
                       userVote ?
                       `You voted ${displayVoteType(userVote)} on this proposal with ${formatVoteNumber(userVotingPower)} voting power.` :
                       onChainHasVoted ?
                         'You have already voted on this proposal.' :
                         userVotingPower <= 0 ?
                           (acquiredAfterSnapshot ?
-                            `Your gKLC was received or delegated after this proposal's snapshot (block ${snapshot ? Number(snapshot) : '—'}), so it cannot vote on this proposal. Voting power is locked in when a proposal is created — your tokens will count on every proposal created from now on.` :
+                            `Your gKMT was received or delegated after this proposal's snapshot (block ${snapshot ? Number(snapshot) : '—'}), so it cannot vote on this proposal. Voting power is locked in when a proposal is created — your tokens will count on every proposal created from now on.` :
                             'You need governance tokens (delegated before this proposal was created) to vote on this proposal.') :
                           Number(state) === 0 ?
                             'Voting has not started yet.' :

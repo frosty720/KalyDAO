@@ -51,6 +51,7 @@ const Footer = () => {
               <li><Link to="/proposals" className={linkClass}>All Proposals</Link></li>
               <li><Link to="/create-proposal" className={linkClass}>Create Proposal</Link></li>
               <li><Link to="/voting-guide" className={linkClass}>Voting Guide</Link></li>
+              <li><Link to="/archive" className={linkClass}>Governance Archive</Link></li>
               <li><Ext href={EXTERNAL.discord}>Governance Forum</Ext></li>
             </ul>
           </div>

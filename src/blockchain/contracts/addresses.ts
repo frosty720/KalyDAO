@@ -1,17 +1,19 @@
-//  Add network-specific addresses
-  export const CONTRACT_ADDRESSES_BY_NETWORK = {
-    mainnet: {
-      GOVERNANCE_TOKEN: "0x4BA2369743c4249ea3f6777CaF433c76dBBa657a",
-      GOVERNOR_CONTRACT: "0xF6C1af62e59D3085f10ac6F782cFDaE23E6352dE",
-      TIMELOCK: "0xA11572e9724dfeD2BCf8ecc9bfEd18CC609C4c6D",
-      TREASURY_VAULT: "0x92564ec0d22BBd5e3FF978B977CA968e6c7d1c44",
-      DAO_SETTINGS: "0xeD23Fda4A23C0b6950dEcD55C4Bd757f644E0578",
-    },
-    testnet: {
-      GOVERNANCE_TOKEN: "0x8Ab92A0B7Ec5a9EA877AD3b15bfEFB795aA24C33",
-      GOVERNOR_CONTRACT: "0x92177A348367D0122e043448e7f308ba989CFb3F",
-      TIMELOCK: "0xAd338da8A2dDE5B5Fe08362c379c66D18Bb24151",
-      TREASURY_VAULT: "0x5aE2cf3fC0B99003C64bBDC7836D08064ED43Aab",
-      DAO_SETTINGS: "0x14daEbEDf316507ed450fecdA46B059E8037d367",
-    },
-  } as const;
+/**
+ * KalyChain 3890 DAO contracts (deployed 2026-08-21, dao-contracts/deployments/kmt).
+ * Mirrors kalychain-ops/files/kmt-3890/addresses.json `.dao` — addresses.test.ts asserts it.
+ *
+ * NOTE: there is NO TreasuryVault on 3890. TREASURY is the relaunch Treasury
+ * (Treasury.sol: execute / sendNative / sendERC20 / transferERC721, onlyOwner). Its owner is
+ * the deployer until the post-migration handoff to the Timelock — until then, proposals that
+ * target it pass the vote but revert at execute().
+ */
+export const CONTRACT_ADDRESSES = {
+  GOVERNANCE_TOKEN: '0xf05c285340FC6DE9fC1a8F225b553DF21f47aFA8', // gKMT
+  GOVERNOR_CONTRACT: '0xf889D405710b7746A48f177506d621ed37f65F65',
+  TIMELOCK: '0xBD2d65Bfddbd220572121F9D2042006e21181dA5',
+  TREASURY: '0xDF8CFefEa7DaA5E5B23c262A461aCcA6356BCA90',
+  DAO_SETTINGS: '0x07272a62e1C80dB9b74f551693e23749DB2EDaD1',
+} as const;
+
+/** Deploy block of the Governor (dao-contracts/deployments/kmt/GovernorContract.json). */
+export const GOVERNOR_DEPLOY_BLOCK = 7276n;

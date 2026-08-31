@@ -8,7 +8,7 @@ import {
 	SIGNALING_VALUE,
 } from './proposals';
 
-const DAO_SETTINGS = '0xeD23Fda4A23C0b6950dEcD55C4Bd757f644E0578' as const;
+const DAO_SETTINGS = '0x07272a62e1C80dB9b74f551693e23749DB2EDaD1' as const; // 3890 DAOSettings
 
 // Re-declared here (the source keeps it private) so we can decode the generated
 // calldata and assert it is a real setStringParameter call with the right args.

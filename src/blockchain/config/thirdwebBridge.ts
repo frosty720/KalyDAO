@@ -7,7 +7,7 @@
  * so every existing wagmi hook (useAccount, useReadContract, useWriteContract,
  * useWaitForTransactionReceipt) keeps working unchanged.
  *
- * Adapted for the DAO's two chains (mainnet 3888 / testnet 3889). Keeps the
+ * ONE chain (KalyChain 3890). Keeps the
  * self-heal (re-sync if wagmi drops while thirdweb stays connected) and the
  * exponential-backoff retry.
  */
@@ -18,24 +18,14 @@ import { useConnect, useDisconnect, useAccount, createConnector } from 'wagmi';
 import { EIP1193 } from 'thirdweb/wallets';
 import type { EIP1193Provider, Chain as ViemChain } from 'viem';
 import type { Chain as ThirdwebChain } from 'thirdweb';
-import { thirdwebClient, twActiveChain, twKalyMainnet, twKalyTestnet } from './thirdweb';
-import { kalyChainMainnet, kalyChainTestnet } from './chains';
+import { thirdwebClient, twActiveChain } from './thirdweb';
+import { kalychain } from './chains';
 
-const WAGMI_CHAINS = {
-  [kalyChainMainnet.id]: kalyChainMainnet,
-  [kalyChainTestnet.id]: kalyChainTestnet,
-} as const;
-
-const TW_CHAINS = {
-  [kalyChainMainnet.id]: twKalyMainnet,
-  [kalyChainTestnet.id]: twKalyTestnet,
-} as const;
-
-function wagmiChainFor(chainId: number): ViemChain {
-  return (WAGMI_CHAINS as Record<number, ViemChain>)[chainId] ?? kalyChainMainnet;
+function wagmiChainFor(_chainId: number): ViemChain {
+  return kalychain;
 }
-function twChainFor(chainId: number | undefined): ThirdwebChain {
-  return (chainId && (TW_CHAINS as Record<number, ThirdwebChain>)[chainId]) || twActiveChain;
+function twChainFor(_chainId: number | undefined): ThirdwebChain {
+  return twActiveChain;
 }
 
 function createThirdwebWagmiConnector(getProvider: () => EIP1193Provider) {

@@ -1,22 +1,17 @@
 import { useCallback, useMemo } from 'react';
-import { useChainId, useAccount } from 'wagmi';
+import { useAccount } from 'wagmi';
 import GovernanceTokenABI from '../abis/GovernanceToken.json';
 import GovernorContractABI from '../abis/GovernorContract.json';
 import TimeLockABI from '../abis/TimeLock.json';
-import TreasuryVaultABI from '../abis/TreasuryVault.json';
-import { CONTRACT_ADDRESSES_BY_NETWORK } from '../contracts/addresses';
+import { treasuryAbi } from '../contracts/treasuryAbi';
+import { CONTRACT_ADDRESSES } from '../contracts/addresses';
 import { getTransactionGasConfig } from '../config/transaction';
 
 export function useDao() {
-  const chainId = useChainId();
   const { address } = useAccount();
   
   const contracts = useMemo(() => {
-    // Get the appropriate network addresses based on chainId
-    const addresses = chainId === 3889 
-      ? CONTRACT_ADDRESSES_BY_NETWORK.testnet
-      : CONTRACT_ADDRESSES_BY_NETWORK.mainnet;
-    
+    const addresses = CONTRACT_ADDRESSES;
     return {
       governanceToken: {
         address: addresses.GOVERNANCE_TOKEN,
@@ -31,11 +26,11 @@ export function useDao() {
         abi: TimeLockABI.abi || TimeLockABI
       },
       treasury: {
-        address: addresses.TREASURY_VAULT,
-        abi: TreasuryVaultABI.abi || TreasuryVaultABI
+        address: addresses.TREASURY,
+        abi: treasuryAbi
       }
     };
-  }, [chainId]);
+  }, []);
 
   const vote = useCallback(async (
     proposalId: bigint,
