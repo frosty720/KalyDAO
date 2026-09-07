@@ -10,7 +10,7 @@ import type { Chain } from 'viem';
  * kalychain-ops/files/kmt-3890/addresses.json.
  */
 export const KALYCHAIN_CHAIN_ID = 3890;
-export const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://testnetrpc.kalychain.io/rpc';
+export const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://mainrpc.kalychain.io/rpc';
 export const EXPLORER_URL = import.meta.env.VITE_EXPLORER_URL || 'https://testnet.kalyscan.io';
 export const EXPLORER_API_URL = `${EXPLORER_URL}/api`;
 
